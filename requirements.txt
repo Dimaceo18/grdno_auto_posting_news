@@ -4,3 +4,4 @@ httpx~=0.25.2
 python-telegram-bot
 newspaper3k
 lxml_html_clean
+pillow==10.1.0
