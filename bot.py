@@ -79,15 +79,12 @@ async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
         print(f"❌ Ошибка при чтении CSV: {e}")
         return []
 
-# ==================== ПАРСЕР СТАТЬИ (С ГАРАНТИРОВАННЫМ ПОИСКОМ ФОТО) ====================
+# ==================== ПАРСЕР СТАТЬИ (С ПРИНУДИТЕЛЬНЫМ ПОИСКОМ ФОТО) ====================
 async def fetch_full_article(url: str) -> Optional[Dict]:
-    """
-    Парсит статью: заголовок, текст, и ГЛАВНОЕ ФОТО
-    """
     try:
         print(f"📡 Загружаем страницу: {url}")
         
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
             response = await client.get(url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
@@ -98,56 +95,31 @@ async def fetch_full_article(url: str) -> Optional[Dict]:
         
         # ========== 1. ЗАГОЛОВОК ==========
         title = None
-        title_selectors = [
-            'h1.entry-title', 'h1.post-title', 'h1.title', 
-            'h1', '.article-title', '.post-title', '.entry-title',
-            'meta[property="og:title"]', 'meta[name="twitter:title"]'
-        ]
-        
-        for selector in title_selectors:
-            if selector.startswith('meta'):
-                meta = soup.find('meta', attrs={'property': selector.split('=')[1].strip('"')}) or \
-                       soup.find('meta', attrs={'name': selector.split('=')[1].strip('"')})
-                if meta and meta.get('content'):
-                    title = meta['content'].strip()
-                    break
-            else:
-                elem = soup.select_one(selector)
-                if elem and elem.get_text(strip=True):
-                    title = elem.get_text(strip=True)
-                    break
-        
+        og_title = soup.find('meta', property='og:title')
+        if og_title and og_title.get('content'):
+            title = og_title['content'].strip()
         if not title and soup.title:
             title = soup.title.get_text(strip=True)
-        
         if not title:
             title = "Новость"
         
         print(f"📰 Заголовок: {title[:60]}...")
         
-        # ========== 2. ТЕКСТ СТАТЬИ ==========
+        # ========== 2. ТЕКСТ ==========
         content_parts = []
-        
-        # Ищем контейнер со статьёй
         article_container = (
             soup.find('article') or 
-            soup.find('div', class_=re.compile(r'(entry-content|post-content|article-content|content)')) or
-            soup.find('main') or
-            soup.find('div', class_=re.compile(r'(text|body)'))
+            soup.find('div', class_=re.compile(r'(entry-content|post-content|article-content|content|post-text)'))
         )
         
         if article_container:
-            # Удаляем ненужные элементы
-            for tag in article_container.find_all(['script', 'style', 'nav', 'aside', 'footer', 'iframe', 'figure']):
+            for tag in article_container.find_all(['script', 'style', 'nav', 'aside', 'footer']):
                 tag.decompose()
-            
-            # Собираем параграфы
             for p in article_container.find_all('p'):
                 text = p.get_text(strip=True)
                 if len(text) > 40:
                     content_parts.append(text)
         
-        # Если не нашли контейнер, ищем все параграфы на странице
         if not content_parts:
             for p in soup.find_all('p'):
                 text = p.get_text(strip=True)
@@ -158,34 +130,29 @@ async def fetch_full_article(url: str) -> Optional[Dict]:
         if len(full_text) > 800:
             full_text = full_text[:800] + "\n\n...(продолжение на сайте)"
         
-        print(f"📄 Текст: {len(full_text)} символов")
-        
-        # ========== 3. ПОИСК ГЛАВНОГО ФОТО (УЛУЧШЕННЫЙ) ==========
+        # ========== 3. ПОИСК ФОТО (ПРИНУДИТЕЛЬНЫЙ) ==========
         image_url = None
         
-        # 3.1 Meta-тег og:image (самый надёжный)
+        # 3.1 og:image (самый надёжный)
         og_image = soup.find('meta', property='og:image')
         if og_image and og_image.get('content'):
             image_url = og_image['content']
-            print(f"✅ Фото найдено через og:image")
+            print(f"✅ Фото через og:image: {image_url[:80]}...")
         
-        # 3.2 Twitter image
+        # 3.2 twitter:image
         if not image_url:
             twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
             if twitter_image and twitter_image.get('content'):
                 image_url = twitter_image['content']
-                print(f"✅ Фото найдено через twitter:image")
+                print(f"✅ Фото через twitter:image: {image_url[:80]}...")
         
-        # 3.3 Ищем изображение внутри статьи
+        # 3.3 Ищем изображение внутри article
         if not image_url and article_container:
-            # Ищем IMG внутри статьи
             for img in article_container.find_all('img'):
                 src = img.get('src') or img.get('data-src')
                 if not src:
                     continue
-                
-                # Пропускаем иконки и маленькие картинки
-                if any(x in src.lower() for x in ['icon', 'logo', 'avatar', 'pixel', 'blank', 'button']):
+                if any(x in src.lower() for x in ['icon', 'logo', 'avatar', 'pixel', 'blank', 'button', 'wp-smiley']):
                     continue
                 
                 # Нормализуем URL
@@ -195,28 +162,29 @@ async def fetch_full_article(url: str) -> Optional[Dict]:
                     src = urljoin(url, src)
                 
                 image_url = src
-                print(f"✅ Фото найдено через img-тег в статье: {image_url[:80]}...")
+                print(f"✅ Фото через img в статье: {image_url[:80]}...")
                 break
         
-        # 3.4 Ищем любую подходящую картинку на странице
+        # 3.4 Ищем любую крупную картинку на странице (размером > 300px)
         if not image_url:
+            print("🔍 Ищем любую крупную картинку...")
             for img in soup.find_all('img', src=True):
                 src = img.get('src') or img.get('data-src')
                 if not src:
                     continue
                 
                 src_lower = src.lower()
-                if any(x in src_lower for x in ['icon', 'logo', 'avatar', 'pixel', 'blank', 'button']):
+                if any(x in src_lower for x in ['icon', 'logo', 'avatar', 'pixel', 'blank', 'button', 'wp-smiley', 'thumb']):
                     continue
                 
-                # Проверяем размеры (есть ли атрибуты)
-                width = img.get('width') or img.get('data-width')
-                height = img.get('height') or img.get('data-height')
+                # Проверяем атрибуты размера
+                width = img.get('width')
+                height = img.get('height')
                 
                 try:
-                    if width and int(width) < 200:
+                    if width and int(width) < 400:
                         continue
-                    if height and int(height) < 200:
+                    if height and int(height) < 300:
                         continue
                 except:
                     pass
@@ -227,9 +195,10 @@ async def fetch_full_article(url: str) -> Optional[Dict]:
                     src = urljoin(url, src)
                 
                 image_url = src
-                print(f"✅ Фото найдено через img-тег на странице: {image_url[:80]}...")
+                print(f"✅ Фото через img на странице: {image_url[:80]}...")
                 break
         
+        # 3.5 Если всё ещё нет фото — берём из описания в CSV (как резерв)
         if not image_url:
             print(f"⚠️ Фото не найдено на странице")
         
@@ -243,7 +212,7 @@ async def fetch_full_article(url: str) -> Optional[Dict]:
         print(f"❌ Ошибка парсинга {url}: {e}")
         return None
 
-# ==================== ОБРАБОТКА ФОТО (СТИЛЬ ЧП ВМ) ====================
+# ==================== ОБРАБОТКА ФОТО ====================
 def crop_to_4x5(img: Image.Image) -> Image.Image:
     w, h = img.size
     target_ratio = 4 / 5
@@ -298,14 +267,12 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, max_lines
     return lines
 
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Обрабатывает фото: обрезка 4:5 → градиент → заголовок"""
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     img = crop_to_4x5(img)
     img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(0.9)
     img = apply_bottom_gradient(img, GRADIENT_HEIGHT_PCT, max_alpha=220)
     
-    # Загружаем шрифт
     try:
         if os.path.exists(FONT_PATH):
             font = ImageFont.truetype(FONT_PATH, 52)
@@ -352,15 +319,10 @@ def get_news_keyboard(news_id: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Бот новостей Гродно*\n\n"
-        "📌 *Как работать:*\n"
         "1️⃣ Нажми «Начать парсинг»\n"
         "2️⃣ Я покажу 10 последних новостей\n"
         "3️⃣ Под каждой новостью выбери «Опубликовать» или «Пропустить»\n\n"
-        "*Изображения автоматически обрабатываются:*\n"
-        "• Обрезка до 4:5\n"
-        "• Градиентный фон\n"
-        "• Наложение заголовка\n\n"
-        "👇 *Нажми кнопку ниже*",
+        "👇 Нажми кнопку ниже",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -370,11 +332,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == "start_parsing":
-        try:
-            await query.answer("⏳ Начинаю парсинг...")
-        except:
-            pass
-        
         await query.edit_message_text("⏳ Парсинг новостей... Загружаю 10 последних материалов...")
         
         news_items = await fetch_news_from_csv(10)
@@ -386,7 +343,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, item in enumerate(news_items):
             if is_already_published(item['url']):
-                await query.message.reply_text(f"⏭️ *Уже было опубликовано ранее:*\n{item['title'][:80]}...", parse_mode="Markdown")
+                await query.message.reply_text(f"⏭️ *Уже было опубликовано:*\n{item['title'][:80]}...", parse_mode="Markdown")
                 continue
             
             status_msg = await query.message.reply_text(f"📡 Загружаю: {item['title'][:60]}...")
@@ -399,21 +356,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             news_id = f"{i}_{abs(hash(item['url']))}"
             
+            # ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА ФОТО
             photo_io = None
             if article.get('image_url'):
                 try:
-                    await status_msg.edit_text(f"📸 Загружаю фото: {item['title'][:50]}...")
-                    print(f"📸 Загружаем фото: {article['image_url']}")
+                    await status_msg.edit_text(f"📸 Загружаю и обрабатываю фото...")
+                    print(f"📸 Скачиваем фото по URL: {article['image_url']}")
                     
-                    async with httpx.AsyncClient(timeout=20.0) as client:
+                    async with httpx.AsyncClient(timeout=25.0) as client:
                         resp = await client.get(article['image_url'])
                         if resp.status_code == 200:
                             photo_io = process_photo(resp.content, article['title'])
-                            print(f"✅ Фото обработано")
+                            print(f"✅ Фото успешно обработано и сохранено")
                         else:
-                            print(f"⚠️ Код ответа: {resp.status_code}")
+                            print(f"⚠️ Ошибка загрузки фото: статус {resp.status_code}")
                 except Exception as e:
-                    print(f"❌ Ошибка обработки фото: {e}")
+                    print(f"❌ Ошибка при работе с фото: {e}")
+            else:
+                print(f"⚠️ URL фото отсутствует для {item['url']}")
             
             pending_news[news_id] = {
                 'title': article['title'],
@@ -426,6 +386,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await status_msg.delete()
             
+            # Отправляем сообщение с фото (если есть) или без
             if photo_io:
                 await query.message.reply_photo(
                     photo=photo_io,
@@ -433,6 +394,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                     reply_markup=get_news_keyboard(news_id)
                 )
+                print(f"✅ Отправлено сообщение с ФОТО для: {article['title'][:50]}...")
             else:
                 await query.message.reply_text(
                     caption,
@@ -440,19 +402,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=False,
                     reply_markup=get_news_keyboard(news_id)
                 )
+                print(f"⚠️ Отправлено сообщение БЕЗ фото для: {article['title'][:50]}...")
             
             await asyncio.sleep(0.5)
         
-        await query.message.reply_text("✅ Готово! Нажми «Опубликовать» под понравившимися новостями.", reply_markup=get_main_keyboard())
+        await query.message.reply_text("✅ Готово!", reply_markup=get_main_keyboard())
     
     elif data.startswith("publish:"):
         news_id = data.split(":")[1]
         news = pending_news.get(news_id)
         if not news:
-            try:
-                await query.answer("❌ Новость не найдена", show_alert=True)
-            except:
-                pass
             return
         
         try:
@@ -465,7 +424,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=caption,
                     parse_mode="Markdown"
                 )
-                print(f"✅ Опубликовано в канал (с фото): {news['title'][:50]}...")
+                print(f"✅ Опубликовано в канал С ФОТО: {news['title'][:50]}...")
             else:
                 await context.bot.send_message(
                     chat_id=CHANNEL_ID,
@@ -473,16 +432,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                     disable_web_page_preview=False
                 )
-                print(f"✅ Опубликовано в канал (без фото): {news['title'][:50]}...")
+                print(f"✅ Опубликовано в канал БЕЗ ФОТО: {news['title'][:50]}...")
             
             save_published(news['url'], news['title'])
             await query.edit_message_caption(caption="✅ Опубликовано в канал!")
             pending_news.pop(news_id, None)
         except Exception as e:
-            try:
-                await query.edit_message_text(f"❌ Ошибка публикации: {e}")
-            except:
-                await query.message.reply_text(f"❌ Ошибка публикации: {e}")
+            await query.edit_message_text(f"❌ Ошибка публикации: {e}")
     
     elif data.startswith("skip:"):
         news_id = data.split(":")[1]
@@ -490,14 +446,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.edit_message_caption(caption="⏭️ Пропущено")
         except:
-            await query.message.reply_text("⏭️ Пропущено")
+            pass
 
 # ==================== ВЕБ-СЕРВЕР ====================
 app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot with photo processing"}
+    return {"status": "ok", "bot": "Grodno News Bot with photo support"}
 
 @app.get("/health")
 async def health():
