@@ -3,15 +3,17 @@ import sqlite3
 import csv
 import os
 import re
+import io
 from io import StringIO
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from telegram import Bot
 import httpx
 from newspaper import Article
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,6 +21,12 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 300 секунд = 5 минут
+
+# ==================== НАСТРОЙКИ ДЛЯ ШАБЛОНА ЧП ВМ ====================
+TARGET_WIDTH = 750
+TARGET_HEIGHT = 938
+GRADIENT_HEIGHT_PCT = 0.48  # 48% высоты под градиент
+FONT_PATH = "Montserrat-Black.ttf"  # Шрифт для заголовка
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -57,12 +65,6 @@ def cleanup_old_news():
         print("🧹 Очистка БД: удалены старые записи")
 
 # ==================== ПАРСЕР CSV ====================
-def clean_html(html_text: str) -> str:
-    """Очистка HTML-тегов (для краткого описания, если понадобится)"""
-    clean = re.sub(r'<[^>]+>', '', html_text)
-    clean = re.sub(r'\s+', ' ', clean)
-    return clean.strip()[:300]
-
 async def fetch_new_news_from_csv() -> List[Dict]:
     """
     Скачиваем CSV-файл с RSS.app и возвращаем список новых ссылок
@@ -84,6 +86,7 @@ async def fetch_new_news_from_csv() -> List[Dict]:
 
                 new_news.append({
                     'url': url,
+                    'title': row.get('Title', ''),
                     'published_at': row.get('Date', datetime.now().isoformat()),
                 })
 
@@ -94,27 +97,24 @@ async def fetch_new_news_from_csv() -> List[Dict]:
         return []
 
 # ==================== ПАРСЕР ПОЛНОЙ СТАТЬИ ====================
-async def fetch_full_article(url: str) -> Dict | None:
+async def fetch_full_article(url: str) -> Optional[Dict]:
     """
     С помощью newspaper3k получаем заголовок, полный текст и главное изображение статьи
     """
     try:
-        # Используем выполнение в отдельном потоке, т.к. newspaper синхронный
         loop = asyncio.get_event_loop()
         article = await loop.run_in_executor(None, lambda: Article(url, language='ru'))
 
-        # Загрузка и парсинг
         article.download()
         article.parse()
 
         title = article.title or "Без заголовка"
         full_text = article.text or "Текст статьи не найден."
 
-        # Обрезаем текст, если он слишком длинный (Telegram лимит ~4096 символов)
         if len(full_text) > 3800:
             full_text = full_text[:3800] + "\n\n...(продолжение на сайте)"
 
-        top_image = article.top_image  # Может быть None
+        top_image = article.top_image
 
         return {
             'title': title,
@@ -125,104 +125,227 @@ async def fetch_full_article(url: str) -> Dict | None:
         print(f"❌ Ошибка при парсинге статьи {url}: {e}")
         return None
 
-# ==================== ОТПРАВКА В TELEGRAM ====================
-async def send_full_news(article_data: Dict, original_url: str) -> bool:
+# ==================== ОБРАБОТКА ФОТО (СТИЛЬ ЧП ВМ) ====================
+def crop_to_4x5(img: Image.Image) -> Image.Image:
+    """Обрезает фото до пропорции 4:5"""
+    w, h = img.size
+    target_ratio = 4 / 5
+    cur_ratio = w / h
+    
+    if cur_ratio > target_ratio:
+        new_w = int(h * target_ratio)
+        left = (w - new_w) // 2
+        return img.crop((left, 0, left + new_w, h))
+    else:
+        new_h = int(w / target_ratio)
+        top = (h - new_h) // 2
+        return img.crop((0, top, w, top + new_h))
+
+def apply_bottom_gradient(img: Image.Image, height_pct: float, max_alpha: int = 220) -> Image.Image:
+    """Накладывает градиент (затемнение) снизу вверх"""
+    w, h = img.size
+    gh = int(h * height_pct)
+    if gh <= 0:
+        return img
+
+    overlay_alpha = Image.new("L", (w, h), 0)
+    grad = Image.new("L", (1, gh), 0)
+    for y in range(gh):
+        a = int(max_alpha * (y / max(1, gh - 1)))
+        grad.putpixel((0, y), a)
+    grad = grad.resize((w, gh))
+    overlay_alpha.paste(grad, (0, h - gh))
+
+    black = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+    base = img.convert("RGBA")
+    overlay = Image.composite(black, Image.new("RGBA", (w, h), (0, 0, 0, 0)), overlay_alpha)
+    out = Image.alpha_composite(base, overlay)
+    return out.convert("RGB")
+
+def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, max_lines: int = 4) -> List[str]:
+    """Разбивает длинный текст на строки"""
+    words = text.split()
+    lines = []
+    current_line = []
+    
+    for word in words:
+        test_line = ' '.join(current_line + [word])
+        bbox = font.getbbox(test_line)
+        width = bbox[2] - bbox[0]
+        
+        if width <= max_width:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(' '.join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+        
+        if len(lines) >= max_lines:
+            break
+    
+    if current_line and len(lines) < max_lines:
+        lines.append(' '.join(current_line))
+    
+    return lines
+
+def process_photo_chp(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     """
-    Отправляет новость в Telegram: фото (если есть) + заголовок + текст + ссылка под фото
+    Обрабатывает фото в стиле ЧП ВМ:
+    - Обрезает до 4:5
+    - Накладывает градиент снизу
+    - Добавляет заголовок белым текстом
     """
-    bot = Bot(token=BOT_TOKEN)
-
-    # Формируем подпись под фото
-    caption = (
-        f"<b>{article_data['title']}</b>\n\n"
-        f"{article_data['text']}\n\n"
-        f"<a href='{original_url}'>📖 Читать на сайте</a>"
-    )
-
-    # Telegram ограничивает длину подписи 1024 символами
-    if len(caption) > 1024:
-        caption = caption[:1020] + "..."
-
+    img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
+    
+    # Обрезаем и ресайзим
+    img = crop_to_4x5(img)
+    img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+    
+    # Немного увеличиваем яркость
+    img = ImageEnhance.Brightness(img).enhance(0.9)
+    
+    # Накладываем градиент снизу
+    img = apply_bottom_gradient(img, GRADIENT_HEIGHT_PCT, max_alpha=220)
+    
+    # Загружаем шрифт
     try:
-        if article_data['image_url']:
-            # Отправляем фото с подписью
+        font = ImageFont.truetype(FONT_PATH, 52)
+    except:
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+        except:
+            font = ImageFont.load_default()
+    
+    draw = ImageDraw.Draw(img)
+    
+    margin_x = int(img.width * 0.06)
+    margin_bottom = int(img.height * 0.08)
+    max_text_width = img.width - 2 * margin_x
+    
+    # Разбиваем текст на строки
+    text_lines = wrap_text(title_text.upper(), font, max_text_width, max_lines=4)
+    
+    # Рассчитываем высоту текста
+    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+    spacing = int(line_height * 0.2)
+    total_text_height = len(text_lines) * line_height + (len(text_lines) - 1) * spacing
+    
+    # Располагаем текст снизу
+    y = img.height - margin_bottom - total_text_height
+    
+    # Рисуем каждую строку
+    for line in text_lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_width = bbox[2] - bbox[0]
+        x = (img.width - line_width) // 2
+        draw.text((x, y), line, font=font, fill="white")
+        y += line_height + spacing
+    
+    output = io.BytesIO()
+    img.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
+    output.seek(0)
+    return output
+
+# ==================== ОТПРАВКА В TELEGRAM ====================
+async def send_full_news(article_data: dict, original_url: str, original_title: str) -> bool:
+    """Отправляет новость с обработанным фото (градиент + заголовок)"""
+    bot = Bot(token=BOT_TOKEN)
+    
+    # Заголовок для обработки фото (используем тот, что спарсили со страницы)
+    photo_title = article_data['title'] if article_data['title'] != "Без заголовка" else original_title
+    
+    if not article_data.get('image_url'):
+        # Если нет фото, отправляем только текст
+        message = f"<b>{article_data['title']}</b>\n\n{article_data['text']}\n\n<a href='{original_url}'>📖 Читать на сайте</a>"
+        try:
+            await bot.send_message(CHANNEL_ID, message, parse_mode='HTML')
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка отправки: {e}")
+            return False
+    
+    try:
+        # Скачиваем фото
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(article_data['image_url'])
+            response.raise_for_status()
+            photo_bytes = response.content
+        
+        # Обрабатываем фото
+        processed_photo = process_photo_chp(photo_bytes, photo_title)
+        
+        # Формируем подпись
+        caption = (
+            f"<b>{article_data['title']}</b>\n\n"
+            f"{article_data['text'][:500]}...\n\n"
+            f"<a href='{original_url}'>📖 Читать полностью на сайте</a>\n\n"
+            f"#Гродно #Новости"
+        )
+        
+        # Отправляем
+        await bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=processed_photo,
+            caption=caption,
+            parse_mode='HTML'
+        )
+        
+        print(f"✅ Отправлено (с фото ЧП ВМ): {article_data['title'][:50]}...")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка при обработке фото: {e}")
+        # Резервная отправка без обработки
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(article_data['image_url'])
+                response.raise_for_status()
+            
+            caption = f"<b>{article_data['title']}</b>\n\n{article_data['text'][:500]}...\n\n<a href='{original_url}'>📖 Читать на сайте</a>"
             await bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=article_data['image_url'],
+                photo=response.content,
                 caption=caption,
                 parse_mode='HTML'
             )
-        else:
-            # Если картинки нет, отправляем просто текст
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=caption,
-                parse_mode='HTML',
-                disable_web_page_preview=False
-            )
-        print(f"✅ Отправлено: {article_data['title'][:50]}...")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка отправки в Telegram: {e}")
-        return False
+            return True
+        except Exception as e2:
+            print(f"❌ Резервная отправка тоже не удалась: {e2}")
+            return False
 
-async def send_text_fallback(title: str, url: str) -> bool:
-    """
-    Резервная отправка только ссылки, если не удалось спарсить полную статью
-    """
-    bot = Bot(token=BOT_TOKEN)
-    message = f"<b>{title}</b>\n\n<a href='{url}'>🔗 Читать на сайте</a>"
-
-    try:
-        await bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=message,
-            parse_mode='HTML',
-            disable_web_page_preview=False
-        )
-        print(f"⚠️ Отправлена ссылка (не удалось получить полный текст): {title[:50]}...")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка отправки ссылки: {e}")
-        return False
-
-# ==================== ПЛАНИРОВЩИК ====================
+# ==================== ОСНОВНАЯ ЛОГИКА ====================
 async def check_and_send():
-    """Основная логика: новые новости → парсинг → отправка"""
+    """Основная логика: новые ссылки → парсинг статьи → обработка фото → отправка"""
     print(f"🔍 Проверка новостей: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    # 1. Получаем новые ссылки из CSV
+    
     new_links = await fetch_new_news_from_csv()
-
-    # 2. Для каждой ссылки парсим полную статью и отправляем
+    
     for item in new_links:
         url = item['url']
-        print(f"📰 Парсинг: {url}")
-
+        csv_title = item.get('title', '')
+        
+        print(f"📰 Обработка: {url}")
+        
+        # Получаем полную статью
         article_data = await fetch_full_article(url)
-
+        
         if article_data:
-            # Успешно: отправляем с фото и полным текстом
-            success = await send_full_news(article_data, url)
+            # Успешно: отправляем с обработанным фото
+            success = await send_full_news(article_data, url, csv_title)
             if success:
                 save_news(url, article_data['title'], item['published_at'])
         else:
-            # Неудачно: отправляем заголовок из CSV + ссылку
-            # Пытаемся хотя бы заголовок достать из CSV, но у нас его нет в new_links.
-            # Поэтому в таком случае лучше пропустить, или сделать отдельный запрос к CSV ещё раз.
-            print(f"⚠️ Не удалось распарсить {url}, пропускаем")
-            # Минимальный fallback (можно удалить)
-            fallback_title = "Новость (полный текст не загружен)"
-            await send_text_fallback(fallback_title, url)
-            save_news(url, fallback_title, item['published_at'])
-
-        # Пауза между новостями, чтобы не спамить Telegram API
-        await asyncio.sleep(3)
-
+            # Не удалось спарсить статью
+            print(f"⚠️ Не удалось спарсить {url}, пропускаем")
+        
+        await asyncio.sleep(2)  # Пауза между новостями
+    
     # Раз в сутки чистим БД
     if datetime.now().hour == 3:
         cleanup_old_news()
-
+    
     print(f"✅ Цикл завершён, следующая проверка через {CHECK_INTERVAL} секунд\n")
 
 async def periodic_checker():
@@ -231,15 +354,15 @@ async def periodic_checker():
         await check_and_send()
         await asyncio.sleep(CHECK_INTERVAL)
 
-# ==================== ВЕБ-СЕРВЕР (FASTAPI) ====================
+# ==================== ВЕБ-СЕРВЕР ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запуск планировщика при старте сервера
+    # Запуск планировщика
     init_db()
     task = asyncio.create_task(periodic_checker())
     print(f"✅ Бот запущен! Проверка новостей каждые {CHECK_INTERVAL} секунд")
+    print(f"📐 Шаблон: ЧП ВМ (градиент + заголовок на фото)")
     yield
-    # Остановка при выключении
     task.cancel()
     print("🛑 Бот остановлен")
 
@@ -249,9 +372,9 @@ app = FastAPI(lifespan=lifespan)
 async def root():
     return {
         "status": "ok",
-        "bot": "Grodno Full News Bot",
+        "bot": "Grodno News Bot (CHP style)",
         "interval_seconds": CHECK_INTERVAL,
-        "version": "2.0 (with newspaper3k)"
+        "version": "3.0 - with photo processing"
     }
 
 @app.get("/health")
@@ -263,3 +386,9 @@ async def stats():
     with sqlite3.connect(DB_PATH) as conn:
         count = conn.execute("SELECT COUNT(*) FROM sent_news").fetchone()[0]
     return {"total_news_sent": count}
+
+# ==================== ЗАПУСК ====================
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
