@@ -2,7 +2,11 @@ services:
   - type: web
     name: grodno-news-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pyenv install 3.11.0 || true
+      pyenv global 3.11.0
+      pip install --upgrade pip
+      pip install -r requirements.txt
     startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: BOT_TOKEN
@@ -11,4 +15,3 @@ services:
         sync: false
       - key: CHECK_INTERVAL
         value: "300"
-    healthCheckPath: /health
