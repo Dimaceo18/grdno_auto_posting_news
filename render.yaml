@@ -3,15 +3,16 @@ services:
     name: grodno-news-bot
     runtime: python
     buildCommand: |
-      pyenv install 3.11.0 || true
-      pyenv global 3.11.0
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
+      wget -O Montserrat-Black.ttf https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat-Black.ttf || true
+    startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: CHANNEL_ID
         sync: false
-      - key: CHECK_INTERVAL
-        value: "300"
+    buildFilter:
+      paths:
+        - bot.py
+        - requirements.txt
