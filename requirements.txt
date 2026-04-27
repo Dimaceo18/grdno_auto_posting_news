@@ -3,5 +3,5 @@ uvicorn==0.24.0
 httpx==0.25.2
 newspaper3k==0.2.8
 lxml_html_clean==0.1.0
-pillow==10.1.0
+pillow==9.5.0
 python-telegram-bot==20.6
