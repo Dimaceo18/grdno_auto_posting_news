@@ -10,8 +10,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Скачиваем шрифт Montserrat Black по работающей ссылке
-RUN wget -O Montserrat-Black.ttf https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-Black.ttf
+# Строку wget - ОТСУТСТВУЕТ, используем системный шрифт
 
 # Копируем и устанавливаем зависимости Python
 COPY requirements.txt .
