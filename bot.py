@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import csv
 import os
+import re
 import io
 from io import StringIO
 from datetime import datetime
@@ -76,8 +77,11 @@ async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
         print(f"❌ Ошибка при чтении CSV: {e}")
         return []
 
-# ==================== ПАРСЕР СТАТЬИ ====================
+# ==================== УЛУЧШЕННЫЙ ПАРСЕР СТАТЬИ С ПОИСКОМ ФОТО ====================
 async def fetch_full_article(url: str) -> Optional[Dict]:
+    """
+    Получает полную статью и ИЗОБРАЖЕНИЯ несколькими способами
+    """
     try:
         loop = asyncio.get_event_loop()
         article = await loop.run_in_executor(None, lambda: Article(url, language='ru'))
@@ -89,16 +93,76 @@ async def fetch_full_article(url: str) -> Optional[Dict]:
         if len(full_text) > 800:
             full_text = full_text[:800] + "\n\n...(продолжение на сайте)"
         
+        # ========== УЛУЧШЕННЫЙ ПОИСК ИЗОБРАЖЕНИЙ ==========
+        image_url = None
+        
+        # 1. Сначала пробуем стандартный метод newspaper3k
+        if article.top_image:
+            image_url = article.top_image
+            print(f"✅ Найдено фото через newspaper: {image_url[:80]}...")
+        
+        # 2. Если не нашли, парсим HTML страницы самостоятельно
+        if not image_url:
+            print(f"🔍 Ищем фото на странице вручную...")
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    })
+                    html_content = response.text
+            except Exception as e:
+                print(f"❌ Не удалось загрузить HTML: {e}")
+                html_content = ""
+            
+            if html_content:
+                # Ищем meta-теги с изображениями
+                meta_patterns = [
+                    r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"',
+                    r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"',
+                    r'<meta[^>]*itemprop="image"[^>]*content="([^"]+)"',
+                ]
+                
+                for pattern in meta_patterns:
+                    match = re.search(pattern, html_content, re.IGNORECASE)
+                    if match:
+                        image_url = match.group(1)
+                        print(f"✅ Найдено фото через meta-тег: {image_url[:80]}...")
+                        break
+                
+                # 3. Если всё ещё нет фото, ищем первую большую картинку в статье
+                if not image_url:
+                    # Ищем img с классом, указывающим на контент
+                    img_patterns = [
+                        r'<img[^>]+class="[^"]*(?:wp-image|attachment|size-large|content)[^"]*"[^>]+src="([^"]+)"',
+                        r'<img[^>]+src="([^"]+)"[^>]+class="[^"]*(?:wp-image|attachment|size-large)[^"]*"',
+                        r'<a[^>]+class="[^"]*image-link[^"]*"[^>]*><img[^>]+src="([^"]+)"',
+                        r'<div[^>]+class="[^"]*entry-content[^"]*"[^>]*>.*?<img[^>]+src="([^"]+)"',
+                    ]
+                    
+                    for pattern in img_patterns:
+                        match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                        if match:
+                            image_url = match.group(1)
+                            # Очищаем URL от параметров
+                            image_url = image_url.split('?')[0]
+                            print(f"✅ Найдено фото через img-тег: {image_url[:80]}...")
+                            break
+        
+        # 4. Нормализуем URL (делаем абсолютным, если он относительный)
+        if image_url and image_url.startswith('/'):
+            from urllib.parse import urljoin
+            image_url = urljoin(url, image_url)
+        
         return {
             'title': title,
             'text': full_text,
-            'image_url': article.top_image
+            'image_url': image_url
         }
     except Exception as e:
         print(f"❌ Ошибка парсинга {url}: {e}")
         return None
 
-# ==================== ОБРАБОТКА ФОТО ====================
+# ==================== ОБРАБОТКА ФОТО (СТИЛЬ ЧП ВМ) ====================
 def crop_to_4x5(img: Image.Image) -> Image.Image:
     w, h = img.size
     target_ratio = 4 / 5
@@ -153,19 +217,21 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, max_lines
     return lines
 
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
+    """Обрабатывает фото: обрезка 4:5 → градиент → заголовок"""
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     img = crop_to_4x5(img)
     img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(0.9)
     img = apply_bottom_gradient(img, GRADIENT_HEIGHT_PCT, max_alpha=220)
     
+    # Загружаем шрифт (если нет Montserrat, используем системный)
     try:
-        font = ImageFont.truetype(FONT_PATH, 52)
-    except:
-        try:
+        if os.path.exists(FONT_PATH):
+            font = ImageFont.truetype(FONT_PATH, 52)
+        else:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-        except:
-            font = ImageFont.load_default()
+    except:
+        font = ImageFont.load_default()
     
     draw = ImageDraw.Draw(img)
     margin_x = int(img.width * 0.06)
@@ -224,31 +290,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         news_items = await fetch_news_from_csv(10)
         if not news_items:
-            await query.edit_message_text("❌ Не удалось загрузить новости. Попробуй позже.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("❌ Не удалось загрузить новости.", reply_markup=get_main_keyboard())
             return
         
         pending_news.clear()
-        await query.edit_message_text(f"📰 Найдено {len(news_items)} новостей. Загружаю подробности...")
         
         for i, item in enumerate(news_items):
             if is_already_published(item['url']):
+                await query.message.reply_text(f"⏭️ *Уже было опубликовано ранее:*\n{item['title'][:80]}...", parse_mode="Markdown")
                 continue
             
             article = await fetch_full_article(item['url'])
             if not article:
+                await query.message.reply_text(f"⚠️ *Не удалось загрузить:*\n{item['title'][:80]}...", parse_mode="Markdown")
                 continue
             
             news_id = f"{i}_{abs(hash(item['url']))}"
             
+            # Обрабатываем фото, если есть
             photo_io = None
             if article.get('image_url'):
                 try:
+                    print(f"📸 Загружаем фото: {article['image_url']}")
                     async with httpx.AsyncClient(timeout=15.0) as client:
                         resp = await client.get(article['image_url'])
                         if resp.status_code == 200:
                             photo_io = process_photo(resp.content, article['title'])
+                            print(f"✅ Фото обработано")
+                        else:
+                            print(f"⚠️ Код ответа при загрузке фото: {resp.status_code}")
                 except Exception as e:
-                    print(f"Ошибка фото: {e}")
+                    print(f"❌ Ошибка обработки фото: {e}")
             
             pending_news[news_id] = {
                 'title': article['title'],
@@ -260,9 +332,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = f"📰 *{article['title']}*\n\n{article['text']}\n\n🔗 [Читать на сайте]({item['url']})"
             
             if photo_io:
-                await query.message.reply_photo(photo=photo_io, caption=caption, parse_mode="Markdown", reply_markup=get_news_keyboard(news_id))
+                await query.message.reply_photo(
+                    photo=photo_io,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=get_news_keyboard(news_id)
+                )
             else:
-                await query.message.reply_text(caption, parse_mode="Markdown", disable_web_page_preview=False, reply_markup=get_news_keyboard(news_id))
+                await query.message.reply_text(
+                    caption,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=False,
+                    reply_markup=get_news_keyboard(news_id)
+                )
             
             await asyncio.sleep(0.5)
         
@@ -278,27 +360,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             caption = f"📰 *{news['title']}*\n\n{news['text']}\n\n🔗 [Читать полностью]({news['url']})\n\n#Гродно #Новости"
             
-            if news['photo']:
-                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=news['photo'], caption=caption, parse_mode="Markdown")
+            if news.get('photo'):
+                await context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=news['photo'],
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
             else:
-                await context.bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="Markdown", disable_web_page_preview=False)
+                await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=caption,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=False
+                )
             
             save_published(news['url'], news['title'])
-            await query.edit_message_caption(caption="✅ Опубликовано!", reply_markup=None)
+            await query.edit_message_caption(caption="✅ Опубликовано в канал!")
+            pending_news.pop(news_id, None)
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка публикации: {e}")
     
     elif data.startswith("skip:"):
         news_id = data.split(":")[1]
         pending_news.pop(news_id, None)
-        await query.edit_message_caption(caption="⏭️ Пропущено", reply_markup=None)
+        await query.edit_message_caption(caption="⏭️ Пропущено")
 
 # ==================== ВЕБ-СЕРВЕР ====================
 app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot with manual publishing"}
+    return {"status": "ok", "bot": "Grodno News Bot with photo processing"}
 
 @app.get("/health")
 async def health():
@@ -320,13 +413,13 @@ async def run_bot():
 
 if __name__ == "__main__":
     import threading
+    import uvicorn
     
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    bot_task = loop.create_task(run_bot())
+    loop.create_task(run_bot())
     
-    import uvicorn
     port = int(os.getenv("PORT", 10000))
     server_thread = threading.Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=port))
     server_thread.start()
