@@ -8,7 +8,6 @@ from typing import List, Dict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from telegram import Bot
-from telegram.ext import CommandHandler, Application
 import httpx
 import re
 
@@ -46,17 +45,7 @@ def save_news(url: str, title: str, published_at: str = None):
             (url, title, datetime.now(), published_at)
         )
 
-def get_last_news(limit: int = 10):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        result = conn.execute(
-            "SELECT title, url, published_at FROM sent_news ORDER BY sent_at DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
-        return [dict(row) for row in result]
-
 def cleanup_old_news():
-    """Удаляем новости старше 30 дней"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM sent_news WHERE sent_at < datetime('now', '-30 days')")
 
@@ -140,7 +129,6 @@ async def check_and_send():
             save_news(news['url'], news['title'], news['published_at'])
         await asyncio.sleep(1)
     
-    # Раз в сутки чистим БД
     if datetime.now().hour == 3:
         cleanup_old_news()
 
@@ -149,65 +137,24 @@ async def periodic_checker():
         await check_and_send()
         await asyncio.sleep(CHECK_INTERVAL)
 
-# ==================== КОМАНДЫ ДЛЯ БОТА ====================
-async def start_command(update, context):
-    await update.message.reply_text(
-        "🤖 Бот новостей Гродно работает!\n\n"
-        "📰 Команды:\n"
-        "/last - последние 5 новостей\n"
-        "/stats - статистика"
-    )
-
-async def last_news_command(update, context):
-    news_list = get_last_news(5)
-    if not news_list:
-        await update.message.reply_text("Новостей пока нет")
-        return
-    
-    message = "📰 *Последние новости:*\n\n"
-    for i, news in enumerate(news_list, 1):
-        message += f"{i}. [{news['title'][:50]}]({news['url']})\n"
-    
-    await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
-
-async def stats_command(update, context):
-    with sqlite3.connect(DB_PATH) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM sent_news").fetchone()[0]
-    
-    await update.message.reply_text(
-        f"📊 *Статистика*\n\n"
-        f"📰 Отправлено: {count} новостей\n"
-        f"⏱ Интервал: {CHECK_INTERVAL // 60} мин\n"
-        f"✅ Статус: активен"
-    )
-
 # ==================== ВЕБ-СЕРВЕР ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запуск
+    # Запуск планировщика
     init_db()
-    checker_task = asyncio.create_task(periodic_checker())
-    
-    # Запускаем Telegram бота для команд
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("last", last_news_command))
-    telegram_app.add_handler(CommandHandler("stats", stats_command))
-    telegram_task = asyncio.create_task(telegram_app.run_polling())
-    
-    print("✅ Бот запущен!")
+    task = asyncio.create_task(periodic_checker())
+    print("✅ Бот запущен! Проверка новостей каждые", CHECK_INTERVAL, "секунд")
     
     yield
     
     # Остановка
-    checker_task.cancel()
-    telegram_task.cancel()
+    task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot", "interval_seconds": CHECK_INTERVAL}
+    return {"status": "ok", "bot": "Grodno News Bot"}
 
 @app.get("/health")
 async def health():
