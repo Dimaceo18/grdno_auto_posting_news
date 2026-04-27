@@ -367,15 +367,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     
     if data == "start_parsing":
+        try:
+            await query.answer("⏳ Начинаю парсинг...")
+        except:
+            pass
+        
         await query.edit_message_text("⏳ Парсинг новостей... Загружаю 10 последних материалов...")
         
         news_items = await fetch_news_from_csv(10)
         if not news_items:
-            await query.edit_message_text("❌ Не удалось загрузить новости.", reply_markup=get_main_keyboard())
+            await query.message.reply_text("❌ Не удалось загрузить новости.", reply_markup=get_main_keyboard())
             return
         
         pending_news.clear()
@@ -385,7 +389,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"⏭️ *Уже было опубликовано ранее:*\n{item['title'][:80]}...", parse_mode="Markdown")
                 continue
             
-            # Отправляем статус
             status_msg = await query.message.reply_text(f"📡 Загружаю: {item['title'][:60]}...")
             
             article = await fetch_full_article(item['url'])
@@ -396,7 +399,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             news_id = f"{i}_{abs(hash(item['url']))}"
             
-            # Обрабатываем фото
             photo_io = None
             if article.get('image_url'):
                 try:
@@ -447,7 +449,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         news_id = data.split(":")[1]
         news = pending_news.get(news_id)
         if not news:
-            await query.edit_message_text("❌ Новость не найдена.")
+            try:
+                await query.answer("❌ Новость не найдена", show_alert=True)
+            except:
+                pass
             return
         
         try:
@@ -474,12 +479,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(caption="✅ Опубликовано в канал!")
             pending_news.pop(news_id, None)
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка публикации: {e}")
+            try:
+                await query.edit_message_text(f"❌ Ошибка публикации: {e}")
+            except:
+                await query.message.reply_text(f"❌ Ошибка публикации: {e}")
     
     elif data.startswith("skip:"):
         news_id = data.split(":")[1]
         pending_news.pop(news_id, None)
-        await query.edit_message_caption(caption="⏭️ Пропущено")
+        try:
+            await query.edit_message_caption(caption="⏭️ Пропущено")
+        except:
+            await query.message.reply_text("⏭️ Пропущено")
 
 # ==================== ВЕБ-СЕРВЕР ====================
 app = FastAPI()
