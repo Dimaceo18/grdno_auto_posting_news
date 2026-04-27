@@ -1,7 +1,6 @@
-fastapi
-uvicorn
-httpx~=0.25.2
-python-telegram-bot
-newspaper3k
-lxml_html_clean
+fastapi==0.104.1
+uvicorn==0.24.0
+httpx==0.25.2
+newspaper3k==0.2.8
+lxml_html_clean==0.1.0
 pillow==10.1.0
