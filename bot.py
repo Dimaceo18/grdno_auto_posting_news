@@ -229,21 +229,19 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         img = Image.alpha_composite(base, overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
     
-    # ============ ПОИСК ШРИФТА В ПАПКЕ ПРОЕКТА ============
+    # ============ ПОИСК ШРИФТА MONTSERRAT-BLACK ============
     font = None
     font_size = 68
     
-    # Пути к шрифту в папке проекта (в порядке приоритета)
     font_paths = [
-        "Montserrat-Bold.ttf",      # корень проекта
-        "fonts/Montserrat-Bold.ttf", # папка fonts
-        "Montserrat-Black.ttf",
-        "fonts/Montserrat-Black.ttf",
-        "/app/Montserrat-Bold.ttf",  # Docker контейнер
-        "/app/fonts/Montserrat-Bold.ttf",
+        "Montserrat-Black.ttf",          # корень проекта
+        "fonts/Montserrat-Black.ttf",    # папка fonts
+        "/app/Montserrat-Black.ttf",     # Docker контейнер
+        "/app/fonts/Montserrat-Black.ttf",
+        "Montserrat-Bold.ttf",           # запасной вариант
+        "DejaVuSans-Bold.ttf",           # системный запасной
     ]
     
-    # Пытаемся загрузить шрифт
     for font_path in font_paths:
         try:
             if os.path.exists(font_path):
@@ -254,7 +252,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
             print(f"⚠️ Не удалось загрузить {font_path}: {e}")
             continue
     
-    # Если ни один шрифт не загрузился, используем стандартный
     if font is None:
         font = ImageFont.load_default()
         print("⚠️ Шрифт не найден, использую стандартный")
@@ -283,7 +280,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
             line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
         
-        # Чёрная обводка
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
