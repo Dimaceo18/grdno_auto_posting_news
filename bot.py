@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 from fastapi import FastAPI
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import httpx
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
@@ -120,9 +120,9 @@ async def fetch_article_text(url: str) -> str:
         print(f"❌ Ошибка получения текста: {e}")
         return "Не удалось загрузить текст статьи."
 
-# ==================== ОБРАБОТКА ФОТО (СТИЛЬ ЧП ВМ) ====================
+# ==================== ОБРАБОТКА ФОТО (С ОБВОДКОЙ ТЕКСТА) ====================
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Обрабатывает фото со встроенным шрифтом PIL"""
+    """Обрабатывает фото с обводкой текста для лучшей читаемости"""
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     
     # Обрезка до 4:5
@@ -159,25 +159,15 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     draw = ImageDraw.Draw(img)
     
-    # СОЗДАЁМ ШРИФТ ПРОГРАММНО (без внешних файлов)
-    # Используем встроенный шрифт, но увеличиваем его через масштабирование
+    # Загрузка шрифта
+    font = None
     try:
-        # Пробуем загрузить любой доступный шрифт
-        import subprocess
-        result = subprocess.run(['fc-list', ':bold', '--format=%{file}\\n'], capture_output=True, text=True)
-        font_paths = result.stdout.strip().split('\n')
-        font = None
-        for fp in font_paths:
-            if fp and 'ttf' in fp and os.path.exists(fp):
-                try:
-                    font = ImageFont.truetype(fp, 56)
-                    break
-                except:
-                    continue
-        if not font:
-            font = ImageFont.load_default()
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
     except:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 56)
+        except:
+            font = ImageFont.load_default()
     
     # Параметры текста
     margin_x = int(img.width * 0.06)
@@ -192,8 +182,12 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     for word in words:
         test_line = ' '.join(current_line + [word])
-        bbox = font.getbbox(test_line)
-        width = bbox[2] - bbox[0]
+        if font == ImageFont.load_default():
+            width = len(test_line) * 15
+        else:
+            bbox = font.getbbox(test_line)
+            width = bbox[2] - bbox[0]
+        
         if width <= max_text_width:
             current_line.append(word)
         else:
@@ -210,8 +204,8 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     # Вычисление высоты
     if font == ImageFont.load_default():
-        line_height = 20
-        spacing = 6
+        line_height = 24
+        spacing = 8
     else:
         line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
         spacing = int(line_height * 0.25)
@@ -221,15 +215,19 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     # Отрисовка с обводкой для лучшей читаемости
     for line in lines:
-        bbox = font.getbbox(line)
-        line_width = bbox[2] - bbox[0]
+        if font == ImageFont.load_default():
+            line_width = len(line) * 15
+        else:
+            bbox = font.getbbox(line)
+            line_width = bbox[2] - bbox[0]
+        
         x = (img.width - line_width) // 2
         
-        # Рисуем тень/обводку
-        offsets = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        # Рисуем чёрную обводку (тень) со всех сторон
+        offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
-            draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 200))
-        # Рисуем основной текст
+            draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
+        # Рисуем основной белый текст
         draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
         y += line_height + spacing
     
@@ -237,6 +235,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     img.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
     output.seek(0)
     return output
+
 # ==================== КНОПКИ ====================
 def get_main_keyboard():
     keyboard = [[InlineKeyboardButton("📰 Начать парсинг (10 новостей)", callback_data="start_parsing")]]
@@ -249,18 +248,133 @@ def get_news_keyboard(news_id: str):
     ]]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== ОБРАБОТЧИКИ ====================
+def get_post_preview_keyboard():
+    keyboard = [[InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")]]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_publish_preview_keyboard():
+    keyboard = [[InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")]]
+    return InlineKeyboardMarkup(keyboard)
+
+# ==================== ОБРАБОТЧИК РЕПОСТОВ ====================
+async def handle_forwarded_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает пересланные сообщения (посты)"""
+    message = update.message
+    
+    if not message.text and not message.caption:
+        await message.reply_text("❌ Пожалуйста, перешлите пост с текстом и фото (или просто текст).")
+        return
+    
+    if "pending_post" not in context.user_data:
+        context.user_data["pending_post"] = {}
+    
+    text = message.text or message.caption or ""
+    context.user_data["pending_post"]["text"] = text
+    
+    if message.photo:
+        photo = message.photo[-1]
+        context.user_data["pending_post"]["has_photo"] = True
+        
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+        context.user_data["pending_post"]["photo_bytes"] = photo_bytes
+        
+        await message.reply_photo(
+            photo=photo_bytes,
+            caption=f"📝 *Получен пост для оформления!*\n\n{text[:300]}...\n\nНажми кнопку ниже, чтобы оформить.",
+            parse_mode="Markdown",
+            reply_markup=get_post_preview_keyboard()
+        )
+    else:
+        context.user_data["pending_post"]["has_photo"] = False
+        await message.reply_text(
+            f"📝 *Получен текст для оформления!*\n\n{text[:300]}...\n\nНажми кнопку ниже, чтобы оформить.\n\n*⚠️ Для лучшего результата отправляйте пост с фото.*",
+            parse_mode="Markdown",
+            reply_markup=get_post_preview_keyboard()
+        )
+
+# ==================== ОФОРМЛЕНИЕ ПОСТА ====================
+async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.user_data.get("pending_post", {})
+    
+    if not pending or not pending.get("text"):
+        await query.edit_message_text("❌ Нет данных для оформления.")
+        return
+    
+    text = pending.get("text", "")
+    lines = text.split('\n')
+    title = lines[0][:100] if lines else text[:100]
+    
+    photo_io = None
+    if pending.get("has_photo") and pending.get("photo_bytes"):
+        try:
+            await query.edit_message_text("🎨 Оформляю пост...")
+            photo_io = process_photo(pending["photo_bytes"], title)
+            print(f"✅ Пост оформлен: {title[:50]}...")
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+    
+    context.user_data["designed_post"] = {
+        'title': title,
+        'text': text,
+        'photo': photo_io
+    }
+    
+    caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен!"
+    
+    if photo_io:
+        await query.edit_message_media(
+            media=InputMediaPhoto(media=photo_io, caption=caption, parse_mode="Markdown"),
+            reply_markup=get_publish_preview_keyboard()
+        )
+    else:
+        await query.edit_message_text(caption, parse_mode="Markdown", reply_markup=get_publish_preview_keyboard())
+
+# ==================== ПУБЛИКАЦИЯ ====================
+async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    designed = context.user_data.get("designed_post", {})
+    
+    if not designed:
+        await query.edit_message_text("❌ Нет оформленного поста.")
+        return
+    
+    try:
+        caption = f"📰 *{designed['title']}*\n\n{designed['text']}\n\n#Реклама"
+        
+        if designed.get('photo'):
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=designed['photo'],
+                caption=caption,
+                parse_mode="Markdown"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="Markdown"
+            )
+        
+        await query.edit_message_text("✅ Пост опубликован в канал!")
+        context.user_data.pop("pending_post", None)
+        context.user_data.pop("designed_post", None)
+    except Exception as e:
+        await query.edit_message_text(f"❌ Ошибка: {e}")
+
+# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Бот новостей Гродно*\n\n"
-        "1️⃣ Нажми «Начать парсинг»\n"
-        "2️⃣ Я покажу 10 последних новостей\n"
-        "3️⃣ Под каждой новостью выбери «Опубликовать» или «Пропустить»\n\n"
-        "*Фото автоматически обрабатываются:*\n"
-        "• Обрезка до 4:5\n"
-        "• Затемнение и градиент\n"
-        "• Крупный заголовок\n\n"
-        "👇 Нажми кнопку ниже",
+        "*Доступные функции:*\n\n"
+        "📰 *Парсинг новостей* — нажми кнопку ниже\n"
+        "🔄 *Репост поста* — перешлите любой пост в бот\n\n"
+        "👇 *Нажми кнопку для парсинга новостей*",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -270,7 +384,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == "start_parsing":
-        await query.edit_message_text("⏳ Парсинг новостей... Загружаю 10 последних материалов...")
+        await query.edit_message_text("⏳ Парсинг новостей...")
         
         news_items = await fetch_news_from_csv(10)
         if not news_items:
@@ -281,7 +395,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, item in enumerate(news_items):
             if is_already_published(item['url']):
-                await query.message.reply_text(f"⏭️ *Уже было опубликовано:*\n{item['title'][:80]}...", parse_mode="Markdown")
                 continue
             
             status_msg = await query.message.reply_text(f"📡 Загружаю: {item['title'][:60]}...")
@@ -294,14 +407,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             processed_photo = None
             if image_url:
                 try:
-                    await status_msg.edit_text(f"📸 Обрабатываю фото...")
                     async with httpx.AsyncClient(timeout=20.0) as client:
                         resp = await client.get(image_url)
                         if resp.status_code == 200:
                             processed_photo = process_photo(resp.content, item['title'])
-                            print(f"✅ Фото обработано: {item['title'][:50]}...")
                 except Exception as e:
-                    print(f"❌ Ошибка обработки фото: {e}")
+                    print(f"❌ Ошибка: {e}")
             
             pending_news[news_id] = {
                 'title': item['title'],
@@ -342,25 +453,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = f"📰 *{news['title']}*\n\n{news['text']}\n\n🔗 [Читать полностью]({news['url']})\n\n#Гродно #Новости"
             
             if news.get('photo'):
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=news['photo'],
-                    caption=caption,
-                    parse_mode="Markdown"
-                )
-                print(f"✅ Опубликовано с обработанным фото: {news['title'][:50]}...")
+                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=news['photo'], caption=caption, parse_mode="Markdown")
             else:
-                await context.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=caption,
-                    parse_mode="Markdown"
-                )
+                await context.bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="Markdown")
             
             save_published(news['url'], news['title'])
-            await query.edit_message_caption(caption="✅ Опубликовано в канал!")
+            await query.edit_message_caption(caption="✅ Опубликовано!")
             pending_news.pop(news_id, None)
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка публикации: {e}")
+            await query.edit_message_text(f"❌ Ошибка: {e}")
     
     elif data.startswith("skip:"):
         news_id = data.split(":")[1]
@@ -369,6 +470,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(caption="⏭️ Пропущено")
         except:
             pass
+    
+    elif data == "design_post":
+        await design_post_callback(update, context)
+    
+    elif data == "publish_designed":
+        await publish_designed_callback(update, context)
 
 # ==================== ВЕБ-СЕРВЕР ====================
 app = FastAPI()
@@ -387,6 +494,7 @@ async def run_bot():
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_forwarded_post))
     
     await application.initialize()
     await application.start()
