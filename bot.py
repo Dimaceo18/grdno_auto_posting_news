@@ -2,21 +2,31 @@ import asyncio
 import sqlite3
 import csv
 import os
+import re
+import io
 from io import StringIO
 from datetime import datetime
 from typing import List, Dict, Optional
+from urllib.parse import urljoin
 
 from fastapi import FastAPI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import httpx
 from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
+
+# Настройки обработки фото
+TARGET_WIDTH = 750
+TARGET_HEIGHT = 938
+GRADIENT_HEIGHT_PCT = 0.48
+FONT_PATH = "Montserrat-Black.ttf"
 
 # Хранилище
 pending_news: Dict[str, Dict] = {}
@@ -46,7 +56,7 @@ def save_published(url: str, title: str):
             (url, title, datetime.now())
         )
 
-# ==================== ПАРСЕР ====================
+# ==================== ПАРСЕРЫ ====================
 async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
     news_list = []
     try:
@@ -61,7 +71,6 @@ async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
                     'url': row['Link'],
                     'title': row.get('Title', ''),
                     'description': row.get('Description', ''),
-                    'image': None,  # Будем искать позже
                     'published_at': row.get('Date', datetime.now().isoformat()),
                 })
             return news_list[:limit]
@@ -81,7 +90,6 @@ async def fetch_article_image(url: str) -> Optional[str]:
         
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Ищем og:image (самый надёжный способ)
         og_image = soup.find('meta', property='og:image')
         if og_image and og_image.get('content'):
             image_url = og_image['content']
@@ -90,7 +98,6 @@ async def fetch_article_image(url: str) -> Optional[str]:
             print(f"✅ Найдено фото: {image_url[:80]}...")
             return image_url
         
-        # Альтернатива: twitter:image
         twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
         if twitter_image and twitter_image.get('content'):
             image_url = twitter_image['content']
@@ -113,11 +120,9 @@ async def fetch_article_text(url: str) -> str:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Удаляем скрипты и стили
         for tag in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
             tag.decompose()
         
-        # Ищем контейнер со статьёй
         article = soup.find('article') or soup.find('div', class_=re.compile(r'(content|post-content|entry-content)'))
         
         if article:
@@ -133,7 +138,6 @@ async def fetch_article_text(url: str) -> str:
         
         full_text = '\n\n'.join(text_parts[:15]) if text_parts else "Текст статьи не найден."
         
-        # Ограничиваем длину
         if len(full_text) > 800:
             full_text = full_text[:800] + "\n\n...(продолжение на сайте)"
         
@@ -141,6 +145,98 @@ async def fetch_article_text(url: str) -> str:
     except Exception as e:
         print(f"❌ Ошибка получения текста {url}: {e}")
         return "Не удалось загрузить текст статьи."
+
+# ==================== ОБРАБОТКА ФОТО ====================
+def crop_to_4x5(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    target_ratio = 4 / 5
+    cur_ratio = w / h
+    if cur_ratio > target_ratio:
+        new_w = int(h * target_ratio)
+        left = (w - new_w) // 2
+        return img.crop((left, 0, left + new_w, h))
+    else:
+        new_h = int(w / target_ratio)
+        top = (h - new_h) // 2
+        return img.crop((0, top, w, top + new_h))
+
+def apply_bottom_gradient(img: Image.Image, height_pct: float, max_alpha: int = 220) -> Image.Image:
+    w, h = img.size
+    gh = int(h * height_pct)
+    if gh <= 0:
+        return img
+    overlay_alpha = Image.new("L", (w, h), 0)
+    grad = Image.new("L", (1, gh), 0)
+    for y in range(gh):
+        a = int(max_alpha * (y / max(1, gh - 1)))
+        grad.putpixel((0, y), a)
+    grad = grad.resize((w, gh))
+    overlay_alpha.paste(grad, (0, h - gh))
+    black = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+    base = img.convert("RGBA")
+    overlay = Image.composite(black, Image.new("RGBA", (w, h), (0, 0, 0, 0)), overlay_alpha)
+    out = Image.alpha_composite(base, overlay)
+    return out.convert("RGB")
+
+def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, max_lines: int = 4) -> List[str]:
+    words = text.split()
+    lines = []
+    current_line = []
+    for word in words:
+        test_line = ' '.join(current_line + [word])
+        bbox = font.getbbox(test_line)
+        width = bbox[2] - bbox[0]
+        if width <= max_width:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(' '.join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+        if len(lines) >= max_lines:
+            break
+    if current_line and len(lines) < max_lines:
+        lines.append(' '.join(current_line))
+    return lines
+
+def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
+    """Обрабатывает фото: обрезка 4:5 → градиент → заголовок"""
+    img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
+    img = crop_to_4x5(img)
+    img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+    img = ImageEnhance.Brightness(img).enhance(0.9)
+    img = apply_bottom_gradient(img, GRADIENT_HEIGHT_PCT, max_alpha=220)
+    
+    try:
+        if os.path.exists(FONT_PATH):
+            font = ImageFont.truetype(FONT_PATH, 52)
+        else:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+    except:
+        font = ImageFont.load_default()
+    
+    draw = ImageDraw.Draw(img)
+    margin_x = int(img.width * 0.06)
+    margin_bottom = int(img.height * 0.08)
+    max_text_width = img.width - 2 * margin_x
+    text_lines = wrap_text(title_text.upper(), font, max_text_width, max_lines=4)
+    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+    spacing = int(line_height * 0.2)
+    total_text_height = len(text_lines) * line_height + (len(text_lines) - 1) * spacing
+    y = img.height - margin_bottom - total_text_height
+    
+    for line in text_lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_width = bbox[2] - bbox[0]
+        x = (img.width - line_width) // 2
+        draw.text((x, y), line, font=font, fill="white")
+        y += line_height + spacing
+    
+    output = io.BytesIO()
+    img.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
+    output.seek(0)
+    return output
 
 # ==================== КНОПКИ ====================
 def get_main_keyboard():
@@ -161,6 +257,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Нажми «Начать парсинг»\n"
         "2️⃣ Я покажу 10 последних новостей\n"
         "3️⃣ Под каждой новостью выбери «Опубликовать» или «Пропустить»\n\n"
+        "*Фото автоматически обрабатываются:* обрезка 4:5, градиент, заголовок\n\n"
         "👇 Нажми кнопку ниже",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -187,51 +284,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             status_msg = await query.message.reply_text(f"📡 Загружаю: {item['title'][:60]}...")
             
-            # Ищем фото
+            # Получаем фото и текст
             image_url = await fetch_article_image(item['url'])
-            
-            # Получаем текст
             article_text = await fetch_article_text(item['url'])
             
             news_id = f"{i}_{abs(hash(item['url']))}"
+            
+            # Обрабатываем фото, если есть
+            processed_photo = None
+            if image_url:
+                try:
+                    await status_msg.edit_text(f"📸 Обрабатываю фото...")
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        resp = await client.get(image_url)
+                        if resp.status_code == 200:
+                            processed_photo = process_photo(resp.content, item['title'])
+                            print(f"✅ Фото обработано: {item['title'][:50]}...")
+                except Exception as e:
+                    print(f"❌ Ошибка обработки фото: {e}")
             
             pending_news[news_id] = {
                 'title': item['title'],
                 'url': item['url'],
                 'text': article_text,
-                'image_url': image_url
+                'photo': processed_photo,
+                'image_url': image_url  # сохраняем на случай, если обработка не удалась
             }
             
             caption = f"📰 *{item['title']}*\n\n{article_text}\n\n🔗 [Читать на сайте]({item['url']})"
             
             await status_msg.delete()
             
-            # Отправляем с фото, если есть
-            if image_url:
-                try:
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        resp = await client.get(image_url)
-                        if resp.status_code == 200:
-                            await query.message.reply_photo(
-                                photo=resp.content,
-                                caption=caption,
-                                parse_mode="Markdown",
-                                reply_markup=get_news_keyboard(news_id)
-                            )
-                            print(f"✅ Отправлено с фото: {item['title'][:50]}...")
-                        else:
-                            await query.message.reply_text(
-                                caption,
-                                parse_mode="Markdown",
-                                reply_markup=get_news_keyboard(news_id)
-                            )
-                except Exception as e:
-                    print(f"❌ Ошибка отправки фото: {e}")
-                    await query.message.reply_text(
-                        caption,
-                        parse_mode="Markdown",
-                        reply_markup=get_news_keyboard(news_id)
-                    )
+            # Отправляем с обработанным фото или без
+            if processed_photo:
+                await query.message.reply_photo(
+                    photo=processed_photo,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=get_news_keyboard(news_id)
+                )
             else:
                 await query.message.reply_text(
                     caption,
@@ -252,37 +343,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             caption = f"📰 *{news['title']}*\n\n{news['text']}\n\n🔗 [Читать полностью]({news['url']})\n\n#Гродно #Новости"
             
-            if news.get('image_url'):
-                try:
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        resp = await client.get(news['image_url'])
-                        if resp.status_code == 200:
-                            await context.bot.send_photo(
-                                chat_id=CHANNEL_ID,
-                                photo=resp.content,
-                                caption=caption,
-                                parse_mode="Markdown"
-                            )
-                            print(f"✅ Опубликовано с фото: {news['title'][:50]}...")
-                        else:
-                            await context.bot.send_message(
-                                chat_id=CHANNEL_ID,
-                                text=caption,
-                                parse_mode="Markdown"
-                            )
-                except Exception as e:
-                    print(f"❌ Ошибка: {e}")
-                    await context.bot.send_message(
-                        chat_id=CHANNEL_ID,
-                        text=caption,
-                        parse_mode="Markdown"
-                    )
+            if news.get('photo'):
+                await context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=news['photo'],
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+                print(f"✅ Опубликовано с ОБРАБОТАННЫМ фото: {news['title'][:50]}...")
+            elif news.get('image_url'):
+                # Резерв: отправляем оригинальное фото
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(news['image_url'])
+                    if resp.status_code == 200:
+                        await context.bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=resp.content,
+                            caption=caption,
+                            parse_mode="Markdown"
+                        )
+                        print(f"✅ Опубликовано с оригинальным фото: {news['title'][:50]}...")
+                    else:
+                        await context.bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=caption,
+                            parse_mode="Markdown"
+                        )
             else:
                 await context.bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=caption,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=False
+                    parse_mode="Markdown"
                 )
             
             save_published(news['url'], news['title'])
@@ -304,7 +395,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot"}
+    return {"status": "ok", "bot": "Grodno News Bot with photo processing"}
 
 @app.get("/health")
 async def health():
@@ -321,13 +412,12 @@ async def run_bot():
     await application.start()
     await application.updater.start_polling()
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен с обработкой фото!")
     return application
 
 if __name__ == "__main__":
     import threading
     import uvicorn
-    import re
     
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
