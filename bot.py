@@ -24,7 +24,6 @@ CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
 
 pending_news: Dict[str, Dict] = {}
-scheduled_posts: List[Dict] = []
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -170,7 +169,7 @@ async def fetch_article_text(url: str) -> str:
         print(f"❌ Ошибка получения текста: {e}")
         return "Не удалось загрузить текст статьи."
 
-# ==================== ОБРАБОТКА ФОТО ====================
+# ==================== ОБРАБОТКА ФОТО (С ПОДДЕРЖКОЙ MONTSERRAT-BOLD) ====================
 def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[str]:
     words = text.split()
     lines = []
@@ -229,28 +228,51 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         overlay = Image.composite(black, Image.new("RGBA", (w, h), (0, 0, 0, 0)), overlay_alpha)
         img = Image.alpha_composite(base, overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
+    
+    # ============ ЗАГРУЗКА ШРИФТА MONTSERRAT-BOLD ============
     font = None
     font_size = 68
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-    except:
+    
+    font_paths = [
+        "Montserrat-Bold.ttf",
+        "Montserrat-Black.ttf",
+        "/app/Montserrat-Bold.ttf",
+        "/app/Montserrat-Black.ttf",
+        "/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf",
+        "/usr/share/fonts/truetype/montserrat/Montserrat-Black.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    ]
+    
+    for font_path in font_paths:
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", font_size)
+            if os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+                print(f"✅ Загружен шрифт: {font_path}")
+                break
         except:
-            font = ImageFont.load_default()
+            continue
+    
+    if font is None:
+        font = ImageFont.load_default()
+        print("⚠️ Шрифт не найден, использую стандартный")
+    
     margin_x = int(img.width * 0.05)
     margin_bottom = int(img.height * 0.08)
     max_text_width = img.width - 2 * margin_x
     title = title_text.upper()
     lines = wrap_text_auto(title, font, max_text_width, max_lines=6)
+    
     if font == ImageFont.load_default():
         line_height = 35
         spacing = 10
     else:
         line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
         spacing = int(line_height * 0.25)
+    
     total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
     y = img.height - margin_bottom - total_text_height
+    
     for line in lines:
         if font == ImageFont.load_default():
             line_width = len(line) * 20
@@ -258,11 +280,13 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
             bbox = font.getbbox(line)
             line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
+        
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
         draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
         y += line_height + spacing
+    
     output = io.BytesIO()
     quality = 85
     while quality >= 60:
@@ -308,7 +332,6 @@ def get_post_preview_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_schedule_keyboard():
-    """Кнопки для выбора времени отложенной публикации"""
     schedule_times = [
         ("Через 30 мин", "30min"),
         ("9:05", "9:05"), ("10:05", "10:05"), ("10:06", "10:06"), ("11:07", "11:07"),
@@ -515,7 +538,6 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     await query.message.edit_reply_markup(reply_markup=get_schedule_keyboard())
 
 async def back_to_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -537,20 +559,17 @@ async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     time_value = query.data.split(":")[1]
     
-    # Определяем время публикации
     now = datetime.now()
     if time_value == "30min":
         publish_time = now + timedelta(minutes=30)
         time_str = "через 30 минут"
     else:
-        # Парсим время HH:MM
         hour, minute = map(int, time_value.split(":"))
         publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if publish_time <= now:
             publish_time += timedelta(days=1)
         time_str = f"{publish_time.strftime('%H:%M')} ({publish_time.strftime('%d.%m')})"
     
-    # Получаем текущий пост
     pending = context.chat_data.get("pending_post", {})
     full_text = pending.get("text", "")
     photo_bytes = pending.get("photo_bytes")
@@ -559,7 +578,6 @@ async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("❌ Нет данных для отложенной публикации")
         return
     
-    # Сохраняем в БД
     save_scheduled_post(full_text, photo_bytes, publish_time)
     
     await query.message.reply_text(
@@ -567,7 +585,6 @@ async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_T
         f"Он будет автоматически опубликован в канал в указанное время."
     )
     
-    # Очищаем временные данные
     context.chat_data.pop("pending_post", None)
     
     try:
@@ -578,7 +595,6 @@ async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def schedule_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     await query.message.edit_reply_markup(reply_markup=get_schedule_keyboard())
     context.user_data["scheduling_designed"] = True
 
@@ -803,7 +819,6 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ==================== ПЛАНИРОВЩИК ====================
 async def check_scheduled_posts(app: Application):
-    """Проверяет и публикует отложенные посты"""
     while True:
         try:
             posts = get_pending_scheduled_posts()
@@ -832,7 +847,7 @@ async def check_scheduled_posts(app: Application):
         except Exception as e:
             print(f"❌ Ошибка в планировщике: {e}")
         
-        await asyncio.sleep(60)  # Проверяем каждую минуту
+        await asyncio.sleep(60)
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -991,7 +1006,6 @@ async def run_bot():
     await application.initialize()
     await application.start()
     
-    # Запускаем планировщик отложенных постов
     asyncio.create_task(check_scheduled_posts(application))
     
     await application.updater.start_polling()
