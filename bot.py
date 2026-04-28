@@ -229,30 +229,32 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         img = Image.alpha_composite(base, overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
     
-    # ============ ЗАГРУЗКА ШРИФТА MONTSERRAT-BOLD ============
+    # ============ ПОИСК ШРИФТА В ПАПКЕ ПРОЕКТА ============
     font = None
     font_size = 68
     
+    # Пути к шрифту в папке проекта (в порядке приоритета)
     font_paths = [
-        "Montserrat-Bold.ttf",
+        "Montserrat-Bold.ttf",      # корень проекта
+        "fonts/Montserrat-Bold.ttf", # папка fonts
         "Montserrat-Black.ttf",
-        "/app/Montserrat-Bold.ttf",
-        "/app/Montserrat-Black.ttf",
-        "/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf",
-        "/usr/share/fonts/truetype/montserrat/Montserrat-Black.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "fonts/Montserrat-Black.ttf",
+        "/app/Montserrat-Bold.ttf",  # Docker контейнер
+        "/app/fonts/Montserrat-Bold.ttf",
     ]
     
+    # Пытаемся загрузить шрифт
     for font_path in font_paths:
         try:
             if os.path.exists(font_path):
                 font = ImageFont.truetype(font_path, font_size)
                 print(f"✅ Загружен шрифт: {font_path}")
                 break
-        except:
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить {font_path}: {e}")
             continue
     
+    # Если ни один шрифт не загрузился, используем стандартный
     if font is None:
         font = ImageFont.load_default()
         print("⚠️ Шрифт не найден, использую стандартный")
@@ -281,6 +283,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
             line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
         
+        # Чёрная обводка
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
