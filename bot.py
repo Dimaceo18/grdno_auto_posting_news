@@ -258,7 +258,7 @@ def get_post_publish_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
+# ==================== ОБРАБОТЧИКИ ====================
 async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message.photo:
@@ -316,81 +316,7 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=get_video_publish_keyboard()
     )
 
-async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка медиагрупп (несколько фото/видео)"""
-    message = update.message
-    if not message.media_group_id:
-        return
-    
-    caption = message.caption or ""
-    
-    print(f"📦 Получена медиагруппа. ID: {message.media_group_id}")
-    
-    context.chat_data["pending_media"] = {
-        "type": "media_group",
-        "text": caption,
-        "media_group_id": message.media_group_id,
-        "message_id": message.message_id,
-        "chat_id": message.chat_id
-    }
-    
-    await message.reply_text(
-        f"📦 *Получена медиагруппа!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Опубликовать медиа» для публикации в канал.\n\n*Внимание:* Кнопка появится после загрузки всех медиа.",
-        parse_mode="Markdown"
-    )
-
-async def publish_media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Публикация медиагруппы в канал"""
-    query = update.callback_query
-    await query.answer()
-    
-    pending_media = context.chat_data.get("pending_media", {})
-    
-    if not pending_media or pending_media.get("type") != "media_group":
-        await query.message.reply_text("❌ Нет медиа для публикации.")
-        return
-    
-    try:
-        text = pending_media.get("text", "")
-        msg_id = pending_media.get("message_id")
-        chat_id = pending_media.get("chat_id")
-        
-        await context.bot.forward_message(
-            chat_id=CHANNEL_ID,
-            from_chat_id=chat_id,
-            message_id=msg_id
-        )
-        
-        if text:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=get_post_publish_keyboard()
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=" ",
-                reply_markup=get_post_publish_keyboard()
-            )
-        
-        print(f"✅ Медиагруппа опубликована в канал с кнопками")
-        
-        await query.message.reply_text("✅ Медиа опубликовано в канал!")
-        
-        context.chat_data.pop("pending_media", None)
-        
-        try:
-            await query.message.delete()
-        except:
-            pass
-        
-    except Exception as e:
-        print(f"❌ Ошибка публикации: {e}")
-        await query.message.reply_text(f"❌ Ошибка: {e}")
-
-# ==================== РЕДАКТИРОВАНИЕ ТЕКСТА ====================
+# ==================== РЕДАКТИРОВАНИЕ ====================
 async def edit_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -430,7 +356,7 @@ async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_for_edit"] = False
     await update.message.reply_text("✅ Редактирование отменено.")
 
-# ==================== ОФОРМЛЕНИЕ ПОСТА ====================
+# ==================== ОФОРМЛЕНИЕ ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -610,8 +536,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Доступные функции:*\n\n"
         "📰 *Парсинг новостей* — нажми кнопку ниже\n"
         "🖼️ *Фото* — отправьте фото с подписью\n"
-        "📹 *Видео* — отправьте видео с подписью\n"
-        "📦 *Медиагруппа* — отправьте несколько фото/видео\n\n"
+        "📹 *Видео* — отправьте видео с подписью\n\n"
         "*Редактирование:*\n"
         "✏️ Можно отредактировать текст перед оформлением\n\n"
         "👇 *Нажми кнопку*",
@@ -734,7 +659,6 @@ async def run_bot():
     application.add_handler(MessageHandler(filters.PHOTO, handle_forwarded_photo))
     application.add_handler(MessageHandler(filters.VIDEO, handle_forwarded_video))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edited_text))
-    application.add_handler(MessageHandler(filters.MediaGroup, handle_media_group))
     
     await application.initialize()
     await application.start()
