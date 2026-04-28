@@ -120,9 +120,9 @@ async def fetch_article_text(url: str) -> str:
         print(f"❌ Ошибка получения текста: {e}")
         return "Не удалось загрузить текст статьи."
 
-# ==================== ОБРАБОТКА ФОТО (С ОБВОДКОЙ ТЕКСТА) ====================
+# ==================== ОБРАБОТКА ФОТО (С ОБВОДКОЙ И СЖАТИЕМ) ====================
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Обрабатывает фото с обводкой текста для лучшей читаемости"""
+    """Обрабатывает фото с обводкой текста и сжимает до 15MB"""
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     
     # Обрезка до 4:5
@@ -138,7 +138,8 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         top = (h - new_h) // 2
         img = img.crop((0, top, w, top + new_h))
     
-    img = img.resize((750, 938), Image.Resampling.LANCZOS)
+    # Уменьшаем размер
+    img = img.resize((1080, 1350), Image.Resampling.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(0.85)
     
     # Градиент снизу
@@ -162,10 +163,10 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     # Загрузка шрифта
     font = None
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
     except:
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 56)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 72)
         except:
             font = ImageFont.load_default()
     
@@ -204,8 +205,8 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     # Вычисление высоты
     if font == ImageFont.load_default():
-        line_height = 24
-        spacing = 8
+        line_height = 28
+        spacing = 10
     else:
         line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
         spacing = int(line_height * 0.25)
@@ -231,9 +232,20 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
         y += line_height + spacing
     
+    # Сжатие
     output = io.BytesIO()
-    img.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
+    quality = 85
+    while quality >= 60:
+        output.seek(0)
+        output.truncate()
+        img.save(output, format="JPEG", quality=quality, subsampling=0, optimize=True)
+        size = output.tell() / (1024 * 1024)
+        if size <= 15:
+            break
+        quality -= 10
+    
     output.seek(0)
+    print(f"✅ Фото готово: {output.tell() / (1024 * 1024):.1f}MB")
     return output
 
 # ==================== КНОПКИ ====================
@@ -278,6 +290,9 @@ async def handle_forwarded_text(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Фото с подписью"""
     message = update.message
+    if not message.photo:
+        return
+    
     caption = message.caption or ""
     photo = message.photo[-1]
     
@@ -287,13 +302,19 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["pending_post"]["text"] = caption
     context.user_data["pending_post"]["has_photo"] = True
     
-    file = await context.bot.get_file(photo.file_id)
-    photo_bytes = await file.download_as_bytearray()
-    context.user_data["pending_post"]["photo_bytes"] = photo_bytes
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+        context.user_data["pending_post"]["photo_bytes"] = photo_bytes
+    except Exception as e:
+        print(f"❌ Ошибка скачивания фото: {e}")
+        await message.reply_text("❌ Не удалось загрузить фото.")
+        return
     
+    preview_text = caption[:300] if caption else "без текста"
     await message.reply_photo(
         photo=photo_bytes,
-        caption=f"📝 *Получен пост для оформления!*\n\n{caption[:300]}...\n\nНажми «Оформить пост»",
+        caption=f"📝 *Получен пост для оформления!*\n\n{preview_text}...\n\nНажми «Оформить пост»",
         parse_mode="Markdown",
         reply_markup=get_post_preview_keyboard()
     )
@@ -323,6 +344,9 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             print(f"❌ Ошибка оформления фото: {e}")
             await query.edit_message_text(f"⚠️ Ошибка при оформлении фото: {e}")
             return
+    else:
+        await query.edit_message_text("⚠️ Для оформления нужно фото с подписью. Отправьте фото с текстом.")
+        return
     
     context.user_data["designed_post"] = {
         'title': title,
@@ -332,13 +356,10 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен! Нажми «Опубликовать» для отправки в канал."
     
-    if photo_io:
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=photo_io, caption=caption, parse_mode="Markdown"),
-            reply_markup=get_publish_preview_keyboard()
-        )
-    else:
-        await query.edit_message_text(caption, parse_mode="Markdown", reply_markup=get_publish_preview_keyboard())
+    await query.edit_message_media(
+        media=InputMediaPhoto(media=photo_io, caption=caption, parse_mode="Markdown"),
+        reply_markup=get_publish_preview_keyboard()
+    )
 
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Публикует оформленный пост в канал"""
@@ -361,7 +382,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
                 caption=caption,
                 parse_mode="Markdown"
             )
-            print(f"✅ Опубликован оформленный пост в канал: {designed['title'][:50]}...")
+            print(f"✅ Опубликован оформленный пост: {designed['title'][:50]}...")
         else:
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
@@ -382,11 +403,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *Бот новостей Гродно*\n\n"
         "*Доступные функции:*\n\n"
         "📰 *Парсинг новостей* — нажми кнопку ниже\n"
-        "🔄 *Оформление постов* — перешлите любой пост в бот (текст или фото с подписью)\n\n"
-        "*Фото автоматически обрабатываются:*\n"
-        "• Обрезка до 4:5\n"
-        "• Затемнение и градиент\n"
-        "• Крупный заголовок с обводкой\n\n"
+        "🔄 *Оформление постов* — отправьте фото с подписью в бот\n\n"
+        "*Как оформить пост:*\n"
+        "1️⃣ Отправь фото с подписью\n"
+        "2️⃣ Нажми «Оформить пост»\n"
+        "3️⃣ Нажми «Опубликовать в канал»\n\n"
         "👇 *Нажми кнопку для парсинга новостей*",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -469,13 +490,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = f"📰 *{news['title']}*\n\n{news['text']}\n\n🔗 [Читать полностью]({news['url']})\n\n#Гродно #Новости"
             
             if news.get('photo'):
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=news['photo'],
-                    caption=caption,
-                    parse_mode="Markdown"
-                )
-                print(f"✅ Опубликовано с обработанным фото: {news['title'][:50]}...")
+                try:
+                    await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=news['photo'],
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
+                    print(f"✅ Опубликовано с фото: {news['title'][:50]}...")
+                except Exception as e:
+                    print(f"⚠️ Ошибка отправки фото: {e}")
+                    await context.bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=caption,
+                        parse_mode="Markdown"
+                    )
             else:
                 await context.bot.send_message(
                     chat_id=CHANNEL_ID,
