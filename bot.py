@@ -120,9 +120,10 @@ async def fetch_article_text(url: str) -> str:
         print(f"❌ Ошибка получения текста: {e}")
         return "Не удалось загрузить текст статьи."
 
-# ==================== ОБРАБОТКА ФОТО (С ОБВОДКОЙ И СЖАТИЕМ) ====================
+# ==================== ОБРАБОТКА ФОТО ====================
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Обрабатывает фото с обводкой текста и сжимает до 15MB"""
+    print(f"🖼️ Начинаем обработку фото, размер: {len(photo_bytes) / 1024:.1f}KB")
+    
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     
     # Обрезка до 4:5
@@ -138,7 +139,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         top = (h - new_h) // 2
         img = img.crop((0, top, w, top + new_h))
     
-    # Уменьшаем размер
     img = img.resize((1080, 1350), Image.Resampling.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(0.85)
     
@@ -275,6 +275,8 @@ async def handle_forwarded_text(update: Update, context: ContextTypes.DEFAULT_TY
     if not message.text:
         return
     
+    print(f"📝 Получен текст: {len(message.text)} символов")
+    
     if "pending_post" not in context.user_data:
         context.user_data["pending_post"] = {}
     
@@ -282,7 +284,7 @@ async def handle_forwarded_text(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["pending_post"]["has_photo"] = False
     
     await message.reply_text(
-        f"📝 *Получен текст для оформления!*\n\n{message.text[:300]}...\n\nНажми «Оформить пост»",
+        f"📝 *Получен текст для оформления!*\n\n{message.text[:300]}...\n\nНажми «Оформить пост»\n\n*⚠️ Для лучшего результата отправляйте фото с подписью.*",
         parse_mode="Markdown",
         reply_markup=get_post_preview_keyboard()
     )
@@ -296,6 +298,10 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     caption = message.caption or ""
     photo = message.photo[-1]
     
+    print(f"📸 Получено фото. Размеров фото: {len(message.photo)}")
+    print(f"📸 Есть подпись: {len(caption)} символов")
+    print(f"📸 ID фото: {photo.file_id}")
+    
     if "pending_post" not in context.user_data:
         context.user_data["pending_post"] = {}
     
@@ -304,11 +310,13 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     
     try:
         file = await context.bot.get_file(photo.file_id)
+        print(f"📸 Размер файла по данным Telegram: {file.file_size} байт")
         photo_bytes = await file.download_as_bytearray()
         context.user_data["pending_post"]["photo_bytes"] = photo_bytes
+        print(f"✅ Фото скачано: {len(photo_bytes)} байт")
     except Exception as e:
         print(f"❌ Ошибка скачивания фото: {e}")
-        await message.reply_text("❌ Не удалось загрузить фото.")
+        await message.reply_text("❌ Не удалось загрузить фото. Попробуйте еще раз.")
         return
     
     preview_text = caption[:300] if caption else "без текста"
@@ -324,28 +332,38 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
+    print("🎨 Запущено оформление поста")
+    print(f"📦 Данные в context.user_data: {list(context.user_data.keys())}")
+    
     pending = context.user_data.get("pending_post", {})
     
-    if not pending or not pending.get("text"):
+    print(f"📦 pending_post: has_photo={pending.get('has_photo', False)}, текст={len(pending.get('text', ''))} символов")
+    
+    if not pending:
         await query.edit_message_text("❌ Нет данных для оформления. Пожалуйста, отправьте пост заново.")
+        return
+    
+    if not pending.get("text"):
+        await query.edit_message_text("❌ Нет текста для оформления. Отправьте фото с подписью.")
         return
     
     text = pending.get("text", "")
     lines = text.split('\n')
     title = lines[0][:100] if lines else text[:100]
     
+    if not pending.get("has_photo") or not pending.get("photo_bytes"):
+        await query.edit_message_text("❌ Нет фото для оформления. Отправьте фото с подписью.")
+        return
+    
     photo_io = None
-    if pending.get("has_photo") and pending.get("photo_bytes"):
-        try:
-            await query.edit_message_text("🎨 Оформляю пост...")
-            photo_io = process_photo(pending["photo_bytes"], title)
-            print(f"✅ Пост оформлен: {title[:50]}...")
-        except Exception as e:
-            print(f"❌ Ошибка оформления фото: {e}")
-            await query.edit_message_text(f"⚠️ Ошибка при оформлении фото: {e}")
-            return
-    else:
-        await query.edit_message_text("⚠️ Для оформления нужно фото с подписью. Отправьте фото с текстом.")
+    try:
+        await query.edit_message_text("🎨 Оформляю пост...")
+        print(f"📸 Начинаю обработку фото, заголовок: {title[:50]}...")
+        photo_io = process_photo(pending["photo_bytes"], title)
+        print(f"✅ Пост оформлен: {title[:50]}...")
+    except Exception as e:
+        print(f"❌ Ошибка оформления фото: {e}")
+        await query.edit_message_text(f"⚠️ Ошибка при оформлении фото: {e}")
         return
     
     context.user_data["designed_post"] = {
@@ -396,6 +414,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка публикации: {e}")
+        print(f"❌ Ошибка публикации: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -556,7 +575,8 @@ async def run_bot():
     await application.start()
     await application.updater.start_polling()
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен! Готов к работе.")
+    print("📸 Функции: парсинг новостей + оформление репостов")
     return application
 
 if __name__ == "__main__":
