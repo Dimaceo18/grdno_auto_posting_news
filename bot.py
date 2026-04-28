@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 from fastapi import FastAPI
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import httpx
 from bs4 import BeautifulSoup
@@ -114,8 +114,8 @@ async def fetch_article_text(url: str) -> str:
                 text_parts.append(text)
         
         full_text = '\n\n'.join(text_parts[:15]) if text_parts else "Текст статьи не найден."
-        if len(full_text) > 800:
-            full_text = full_text[:800] + "\n\n...(продолжение на сайте)"
+        if len(full_text) > 600:
+            full_text = full_text[:600] + "\n\n...(продолжение на сайте)"
         
         return full_text
     except Exception as e:
@@ -266,19 +266,18 @@ def get_news_keyboard(news_id: str):
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_preview_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
-        [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video_direct")]
-    ]
+    keyboard = [[InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")]]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_video_preview_keyboard():
+    keyboard = [[InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")]]
     return InlineKeyboardMarkup(keyboard)
 
 def get_publish_button():
-    """Кнопка для публикации оформленного поста (одна)"""
     keyboard = [[InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")]]
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_publish_keyboard():
-    """Кнопки после публикации"""
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
         [InlineKeyboardButton("📝 Прислать нам новость", url=SUGGEST_LINK)]
@@ -287,7 +286,6 @@ def get_post_publish_keyboard():
 
 # ==================== ОБРАБОТЧИКИ РЕПОСТОВ ====================
 async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка фото с подписью"""
     message = update.message
     if not message.photo:
         return
@@ -311,7 +309,7 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         
         await message.reply_photo(
             photo=photo.file_id,
-            caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nВыбери действие:",
+            caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Оформить пост»",
             parse_mode="Markdown",
             reply_markup=get_post_preview_keyboard()
         )
@@ -320,7 +318,6 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text(f"❌ Не удалось загрузить фото: {e}")
 
 async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка видео с подписью"""
     message = update.message
     if not message.video:
         return
@@ -331,38 +328,28 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
     print(f"📹 Получено видео. ID: {video.file_id}")
     print(f"📹 Размер: {video.file_size} байт")
     
-    context.chat_data["pending_post"] = {
+    context.chat_data["pending_video"] = {
         "type": "video",
         "text": caption,
         "file_id": video.file_id
     }
     
-    try:
-        file = await context.bot.get_file(video.file_id)
-        video_bytes = await file.download_as_bytearray()
-        context.chat_data["pending_post"]["video_bytes"] = video_bytes
-        print(f"✅ Видео скачано: {len(video_bytes)} байт")
-        
-        await message.reply_video(
-            video=video.file_id,
-            caption=f"📝 *Получен пост с видео!*\n\n{caption[:300] if caption else 'без текста'}...\n\nВыбери действие:",
-            parse_mode="Markdown",
-            reply_markup=get_post_preview_keyboard()
-        )
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        await message.reply_text(f"❌ Не удалось загрузить видео: {e}")
+    await message.reply_video(
+        video=video.file_id,
+        caption=f"📝 *Получен пост с видео!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Опубликовать видео»",
+        parse_mode="Markdown",
+        reply_markup=get_video_preview_keyboard()
+    )
 
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Оформление поста: градиент + заголовок на фото"""
     query = update.callback_query
     await query.answer()
     
     pending = context.chat_data.get("pending_post", {})
     
     if not pending or pending.get("type") != "photo":
-        await query.message.reply_text("❌ Оформить можно только фото с подписью. Отправьте фото.")
+        await query.message.reply_text("❌ Оформить можно только фото с подписью.")
         return
     
     text = pending.get("text", "")
@@ -370,9 +357,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
-    # Заголовок для нанесения на фото - первая строка текста
     title = text.split('\n')[0][:150] if text else "Пост"
-    # Основной текст поста (без заголовка, чтобы не дублироваться)
     main_text = '\n'.join(text.split('\n')[1:]) if '\n' in text else text
     if len(main_text) > 500:
         main_text = main_text[:500] + "..."
@@ -389,18 +374,12 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if photo_io.getbuffer().nbytes == 0:
             raise ValueError("Фото пустое после обработки")
         
-        print(f"✅ Фото обработано: {photo_io.getbuffer().nbytes / 1024:.1f}KB")
-        
-        # Сохраняем оформленный пост
         context.chat_data["designed_post"] = {
             "title": title,
             "text": main_text,
-            "photo_bytes": photo_io.getvalue(),
-            "photo_size": photo_io.getbuffer().nbytes,
-            "type": "photo"
+            "photo_bytes": photo_io.getvalue()
         }
         
-        # Предпросмотр с кнопкой "Опубликовать"
         caption = f"{main_text}\n\n✅ Пост оформлен! Нажми кнопку ниже для публикации."
         
         await query.message.reply_photo(
@@ -419,53 +398,8 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка оформления: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
-# ==================== ПРЯМАЯ ПУБЛИКАЦИЯ ВИДЕО ====================
-async def publish_video_direct_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Прямая публикация видео в канал"""
-    query = update.callback_query
-    await query.answer()
-    
-    pending = context.chat_data.get("pending_post", {})
-    
-    if not pending or pending.get("type") != "video":
-        await query.message.reply_text("❌ Нет видео для публикации.")
-        return
-    
-    text = pending.get("text", "")
-    caption = text[:800] if text else "Видео"
-    
-    try:
-        import html
-        caption_escaped = html.escape(caption)
-        
-        await context.bot.send_video(
-            chat_id=CHANNEL_ID,
-            video=pending.get("video_bytes"),
-            caption=f"{caption_escaped}\n\n#Видео #Новости",
-            parse_mode="HTML"
-        )
-        
-        print(f"✅ Видео опубликовано в канал")
-        
-        await query.message.reply_text(
-            "✅ Видео опубликовано в канал!",
-            reply_markup=get_post_publish_keyboard()
-        )
-        
-        context.chat_data.pop("pending_post", None)
-        
-        try:
-            await query.message.delete()
-        except:
-            pass
-        
-    except Exception as e:
-        print(f"❌ Ошибка публикации видео: {e}")
-        await query.message.reply_text(f"❌ Ошибка: {e}")
-
-# ==================== ПУБЛИКАЦИЯ ОФОРМЛЕННОГО ПОСТА ====================
+# ==================== ПУБЛИКАЦИЯ ФОТО ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Публикация оформленного поста в канал"""
     query = update.callback_query
     await query.answer()
     
@@ -483,26 +417,21 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         return
     
     try:
-        import html
-        text_escaped = html.escape(text)
-        
-        # Отправляем в канал
+        # Отправляем в канал без хештегов
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=photo_bytes,
-            caption=f"{text_escaped}\n\n#Новости #Гродно",
+            caption=text,
             parse_mode="HTML"
         )
         
         print(f"✅ Пост опубликован в канал")
         
-        # После публикации показываем кнопки подписки и предложки новостей
         await query.message.reply_text(
             "✅ Пост опубликован в канал!",
             reply_markup=get_post_publish_keyboard()
         )
         
-        # Очищаем временные данные
         context.chat_data.pop("pending_post", None)
         context.chat_data.pop("designed_post", None)
         
@@ -515,18 +444,66 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         print(f"❌ Ошибка публикации: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
+# ==================== ПУБЛИКАЦИЯ ВИДЕО ====================
+async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.chat_data.get("pending_video", {})
+    
+    if not pending or pending.get("type") != "video":
+        await query.message.reply_text("❌ Нет видео для публикации.")
+        return
+    
+    text = pending.get("text", "")
+    file_id = pending.get("file_id")
+    
+    if not file_id:
+        await query.message.reply_text("❌ Нет file_id видео.")
+        return
+    
+    try:
+        # Отправляем видео в канал без хештегов
+        await context.bot.send_video(
+            chat_id=CHANNEL_ID,
+            video=file_id,
+            caption=text if text else " ",
+            parse_mode="HTML"
+        )
+        
+        print(f"✅ Видео опубликовано в канал")
+        
+        await query.message.reply_text(
+            "✅ Видео опубликовано в канал!",
+            reply_markup=get_post_publish_keyboard()
+        )
+        
+        context.chat_data.pop("pending_video", None)
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+    except Exception as e:
+        print(f"❌ Ошибка публикации видео: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
+
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Бот новостей Гродно*\n\n"
         "*Доступные функции:*\n\n"
         "📰 *Парсинг новостей* — нажми кнопку ниже\n"
-        "🔄 *Оформление постов* — отправьте фото с подписью\n"
+        "🖼️ *Оформление фото* — отправьте фото с подписью\n"
         "📹 *Видео* — отправьте видео с подписью\n\n"
         "*Как оформить пост:*\n"
         "1️⃣ Отправь фото с подписью\n"
         "2️⃣ Нажми «Оформить пост»\n"
         "3️⃣ Нажми «Опубликовать в канал»\n\n"
+        "*Для видео:*\n"
+        "1️⃣ Отправь видео с подписью\n"
+        "2️⃣ Нажми «Опубликовать видео»\n\n"
         "👇 *Нажми кнопку*",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -604,8 +581,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
-            import html
-            caption = f"<b>{html.escape(news['title'])}</b>\n\n{html.escape(news['text'])}\n\n🔗 <a href='{news['url']}'>Читать полностью</a>\n\n#Гродно #Новости"
+            caption = f"{news['text']}\n\n🔗 {news['url']}"
             
             if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
                 await context.bot.send_photo(
@@ -648,8 +624,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "design_post":
         await design_post_callback(update, context)
     
-    elif data == "publish_video_direct":
-        await publish_video_direct_callback(update, context)
+    elif data == "publish_video":
+        await publish_video_callback(update, context)
     
     elif data == "publish_designed":
         await publish_designed_callback(update, context)
@@ -679,7 +655,6 @@ async def run_bot():
     await application.updater.start_polling()
     
     print("✅ Бот запущен!")
-    print("📸 Функции: парсинг новостей + оформление фото + публикация видео")
     return application
 
 if __name__ == "__main__":
