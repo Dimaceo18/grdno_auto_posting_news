@@ -294,6 +294,7 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     photo = message.photo[-1]
     
     print(f"📸 Получено фото. ID: {photo.file_id}")
+    print(f"📸 Размер фото: {photo.file_size} байт")
     
     if "pending_post" not in context.user_data:
         context.user_data["pending_post"] = {}
@@ -307,6 +308,9 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["pending_post"]["photo_bytes"] = photo_bytes
         print(f"✅ Фото скачано: {len(photo_bytes)} байт")
         
+        # ВАЖНО: сохраняем file_id для отправки предпросмотра
+        context.user_data["pending_post"]["file_id"] = photo.file_id
+        
         await message.reply_photo(
             photo=photo.file_id,
             caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Оформить пост»",
@@ -315,7 +319,7 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await message.reply_text("❌ Не удалось загрузить фото")
+        await message.reply_text(f"❌ Не удалось загрузить фото: {e}")
 
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -324,15 +328,19 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     pending = context.user_data.get("pending_post", {})
     
-    if not pending or not pending.get("text"):
-        await query.message.reply_text("❌ Отправьте фото с подписью")
+    if not pending:
+        await query.message.reply_text("❌ Нет данных. Отправьте фото с подписью заново.")
+        return
+    
+    if not pending.get("text"):
+        await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
     text = pending.get("text", "")
     title = text.split('\n')[0][:200] if text else "Пост"
     
     if not pending.get("photo_bytes"):
-        await query.message.reply_text("❌ Нет фото")
+        await query.message.reply_text("❌ Нет фото. Отправьте фото заново.")
         return
     
     try:
@@ -363,6 +371,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=get_publish_preview_keyboard()
         )
         
+        # Удаляем старое сообщение с кнопкой
         try:
             await query.message.delete()
         except:
@@ -379,39 +388,32 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
     designed = context.user_data.get("designed_post", {})
     
     if not designed:
-        await query.message.reply_text("❌ Нет оформленного поста")
+        await query.message.reply_text("❌ Нет оформленного поста. Сначала оформите пост.")
+        return
+    
+    if not designed.get('photo'):
+        await query.message.reply_text("❌ Нет фото для публикации.")
         return
     
     try:
         caption = f"📰 *{designed['title']}*\n\n{designed['text']}\n\n#Реклама"
         
-        if designed.get('photo'):
-            photo_data = designed['photo']
-            photo_size = photo_data.getbuffer().nbytes if hasattr(photo_data, 'getbuffer') else len(photo_data.getvalue())
-            
-            print(f"📸 Размер фото перед отправкой: {photo_size} байт")
-            
-            if photo_size == 0:
-                print("⚠️ Фото пустое, отправляю только текст")
-                await context.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=caption,
-                    parse_mode="Markdown"
-                )
-            else:
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=photo_data,
-                    caption=caption,
-                    parse_mode="Markdown"
-                )
-                print(f"✅ Опубликовано с фото: {designed['title'][:50]}...")
-        else:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=caption,
-                parse_mode="Markdown"
-            )
+        photo_data = designed['photo']
+        photo_size = photo_data.getbuffer().nbytes
+        print(f"📸 Отправка фото в канал: {photo_size} байт")
+        
+        if photo_size == 0:
+            await query.message.reply_text("❌ Фото пустое, невозможно опубликовать. Попробуйте оформить пост заново.")
+            return
+        
+        await context.bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=photo_data,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+        
+        print(f"✅ Опубликовано: {designed['title'][:50]}...")
         
         await query.message.reply_text("✅ Пост опубликован в канал!")
         context.user_data.pop("pending_post", None)
