@@ -286,6 +286,7 @@ def get_publish_preview_keyboard():
 
 # ==================== ОБРАБОТЧИКИ РЕПОСТОВ ====================
 async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка фото с подписью"""
     message = update.message
     if not message.photo:
         return
@@ -294,50 +295,55 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     photo = message.photo[-1]
     
     print(f"📸 Получено фото. ID: {photo.file_id}")
-    print(f"📸 Размер фото: {photo.file_size} байт")
+    print(f"📸 Подпись: {caption[:100] if caption else 'нет'}")
     
-    if "pending_post" not in context.user_data:
-        context.user_data["pending_post"] = {}
+    # Сохраняем данные в chat_data (более надёжно, чем user_data)
+    chat_id = message.chat_id
+    context.chat_data["pending_post"] = {
+        "text": caption,
+        "has_photo": True,
+        "file_id": photo.file_id
+    }
     
-    context.user_data["pending_post"]["text"] = caption
-    context.user_data["pending_post"]["has_photo"] = True
-    
+    # Получаем байты фото для последующей обработки
     try:
         file = await context.bot.get_file(photo.file_id)
         photo_bytes = await file.download_as_bytearray()
-        context.user_data["pending_post"]["photo_bytes"] = photo_bytes
+        context.chat_data["pending_post"]["photo_bytes"] = photo_bytes
         print(f"✅ Фото скачано: {len(photo_bytes)} байт")
-        
-        # ВАЖНО: сохраняем file_id для отправки предпросмотра
-        context.user_data["pending_post"]["file_id"] = photo.file_id
-        
-        await message.reply_photo(
-            photo=photo.file_id,
-            caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Оформить пост»",
-            parse_mode="Markdown",
-            reply_markup=get_post_preview_keyboard()
-        )
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        await message.reply_text(f"❌ Не удалось загрузить фото: {e}")
+        print(f"❌ Ошибка скачивания: {e}")
+        await message.reply_text("❌ Не удалось загрузить фото")
+        return
+    
+    await message.reply_photo(
+        photo=photo.file_id,
+        caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Оформить пост»",
+        parse_mode="Markdown",
+        reply_markup=get_post_preview_keyboard()
+    )
+
 
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Оформление поста: градиент + заголовок на фото"""
     query = update.callback_query
     await query.answer()
     
-    pending = context.user_data.get("pending_post", {})
+    # Берем данные из chat_data
+    pending = context.chat_data.get("pending_post", {})
     
     if not pending:
         await query.message.reply_text("❌ Нет данных. Отправьте фото с подписью заново.")
         return
     
-    if not pending.get("text"):
+    text = pending.get("text", "")
+    if not text:
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
-    text = pending.get("text", "")
-    title = text.split('\n')[0][:200] if text else "Пост"
+    # Заголовок - первая строка текста
+    title = text.split('\n')[0][:150] if text else "Пост"
     
     if not pending.get("photo_bytes"):
         await query.message.reply_text("❌ Нет фото. Отправьте фото заново.")
@@ -346,23 +352,26 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text("🎨 Оформляю пост...")
         
-        print(f"📸 Входящее фото: {len(pending['photo_bytes'])} байт")
+        print(f"📸 Обработка фото, текст: {title[:50]}...")
         
+        # Обрабатываем фото
         photo_io = process_photo(pending["photo_bytes"], title)
         
-        photo_size = photo_io.getbuffer().nbytes
-        print(f"📸 Обработанное фото: {photo_size} байт")
+        # Проверяем результат
+        if photo_io.getbuffer().nbytes == 0:
+            raise ValueError("Фото пустое после обработки")
         
-        if photo_size == 0:
-            raise ValueError("Обработанное фото пустое")
+        print(f"✅ Фото обработано: {photo_io.getbuffer().nbytes / 1024:.1f}KB")
         
-        context.user_data["designed_post"] = {
-            'title': title,
-            'text': text,
-            'photo': photo_io
+        # Сохраняем оформленный пост
+        context.chat_data["designed_post"] = {
+            "title": title,
+            "text": text,
+            "photo_bytes": photo_io.getvalue(),  # Сохраняем как bytes, а не BytesIO
+            "photo_size": photo_io.getbuffer().nbytes
         }
         
-        caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен!"
+        caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен! Нажми «Опубликовать»"
         
         await query.message.reply_photo(
             photo=photo_io,
@@ -371,54 +380,63 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=get_publish_preview_keyboard()
         )
         
-        # Удаляем старое сообщение с кнопкой
+        # Удаляем сообщение с кнопкой "Оформить"
         try:
             await query.message.delete()
         except:
             pass
-            
+        
     except Exception as e:
         print(f"❌ Ошибка оформления: {e}")
-        await query.message.reply_text(f"⚠️ Ошибка: {e}")
+        await query.message.reply_text(f"⚠️ Ошибка оформления: {e}")
 
+
+# ==================== ПУБЛИКАЦИЯ В КАНАЛ ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Публикация оформленного поста в канал"""
     query = update.callback_query
     await query.answer()
     
-    designed = context.user_data.get("designed_post", {})
+    # Берем оформленный пост из chat_data
+    designed = context.chat_data.get("designed_post", {})
     
     if not designed:
-        await query.message.reply_text("❌ Нет оформленного поста. Сначала оформите пост.")
+        await query.message.reply_text("❌ Нет оформленного поста. Сначала оформите пост (нажмите «Оформить пост»).")
+        print("❌ Нет designed_post в chat_data")
         return
     
-    if not designed.get('photo'):
-        await query.message.reply_text("❌ Нет фото для публикации.")
+    title = designed.get("title", "")
+    text = designed.get("text", "")
+    photo_bytes = designed.get("photo_bytes")
+    photo_size = designed.get("photo_size", 0)
+    
+    print(f"📸 Публикация: {title[:50]}...")
+    print(f"📸 Размер фото: {photo_size} байт")
+    
+    if not photo_bytes or photo_size == 0:
+        await query.message.reply_text("❌ Нет фото для публикации. Оформите пост заново.")
         return
     
     try:
-        caption = f"📰 *{designed['title']}*\n\n{designed['text']}\n\n#Реклама"
+        caption = f"📰 *{title}*\n\n{text}\n\n#Реклама"
         
-        photo_data = designed['photo']
-        photo_size = photo_data.getbuffer().nbytes
-        print(f"📸 Отправка фото в канал: {photo_size} байт")
-        
-        if photo_size == 0:
-            await query.message.reply_text("❌ Фото пустое, невозможно опубликовать. Попробуйте оформить пост заново.")
-            return
-        
+        # Отправляем в канал
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
-            photo=photo_data,
+            photo=photo_bytes,  # Передаем bytes напрямую
             caption=caption,
             parse_mode="Markdown"
         )
         
-        print(f"✅ Опубликовано: {designed['title'][:50]}...")
+        print(f"✅ Пост опубликован в канал: {title[:50]}...")
         
-        await query.message.reply_text("✅ Пост опубликован в канал!")
-        context.user_data.pop("pending_post", None)
-        context.user_data.pop("designed_post", None)
+        await query.message.reply_text("✅ Пост успешно опубликован в канал!")
         
+        # Очищаем временные данные
+        context.chat_data.pop("pending_post", None)
+        context.chat_data.pop("designed_post", None)
+        
+        # Удаляем сообщение с предпросмотром
         try:
             await query.message.delete()
         except:
@@ -426,7 +444,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         
     except Exception as e:
         print(f"❌ Ошибка публикации: {e}")
-        await query.message.reply_text(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка публикации: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
