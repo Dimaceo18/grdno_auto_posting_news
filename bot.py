@@ -272,7 +272,13 @@ def get_post_preview_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_publish_keyboard():
+def get_publish_button():
+    """Кнопка для публикации оформленного поста (одна)"""
+    keyboard = [[InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")]]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_post_publish_keyboard():
+    """Кнопки после публикации"""
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
         [InlineKeyboardButton("📝 Прислать нам новость", url=SUGGEST_LINK)]
@@ -364,7 +370,12 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
+    # Заголовок для нанесения на фото - первая строка текста
     title = text.split('\n')[0][:150] if text else "Пост"
+    # Основной текст поста (без заголовка, чтобы не дублироваться)
+    main_text = '\n'.join(text.split('\n')[1:]) if '\n' in text else text
+    if len(main_text) > 500:
+        main_text = main_text[:500] + "..."
     
     if not pending.get("photo_bytes"):
         await query.message.reply_text("❌ Нет фото. Отправьте фото заново.")
@@ -380,21 +391,23 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         print(f"✅ Фото обработано: {photo_io.getbuffer().nbytes / 1024:.1f}KB")
         
+        # Сохраняем оформленный пост
         context.chat_data["designed_post"] = {
             "title": title,
-            "text": text,
+            "text": main_text,
             "photo_bytes": photo_io.getvalue(),
             "photo_size": photo_io.getbuffer().nbytes,
             "type": "photo"
         }
         
-        caption = f"📰 *{title[:100]}*\n\n{text[:500]}...\n\n✅ Пост оформлен!"
+        # Предпросмотр с кнопкой "Опубликовать"
+        caption = f"{main_text}\n\n✅ Пост оформлен! Нажми кнопку ниже для публикации."
         
         await query.message.reply_photo(
             photo=photo_io,
             caption=caption,
             parse_mode="Markdown",
-            reply_markup=get_publish_keyboard()
+            reply_markup=get_publish_button()
         )
         
         try:
@@ -419,25 +432,27 @@ async def publish_video_direct_callback(update: Update, context: ContextTypes.DE
         return
     
     text = pending.get("text", "")
-    caption = f"📰 {text[:800]}\n\n#Видео #Новости" if text else "#Видео #Новости"
+    caption = text[:800] if text else "Видео"
     
     try:
+        import html
+        caption_escaped = html.escape(caption)
+        
         await context.bot.send_video(
             chat_id=CHANNEL_ID,
             video=pending.get("video_bytes"),
-            caption=caption,
-            parse_mode="Markdown"
+            caption=f"{caption_escaped}\n\n#Видео #Новости",
+            parse_mode="HTML"
         )
         
         print(f"✅ Видео опубликовано в канал")
         
         await query.message.reply_text(
             "✅ Видео опубликовано в канал!",
-            reply_markup=get_publish_keyboard()
+            reply_markup=get_post_publish_keyboard()
         )
         
         context.chat_data.pop("pending_post", None)
-        context.chat_data.pop("designed_post", None)
         
         try:
             await query.message.delete()
@@ -448,9 +463,9 @@ async def publish_video_direct_callback(update: Update, context: ContextTypes.DE
         print(f"❌ Ошибка публикации видео: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ В КАНАЛ ====================
+# ==================== ПУБЛИКАЦИЯ ОФОРМЛЕННОГО ПОСТА ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Публикация оформленного поста в канал (вызывается после нажатия кнопки на предпросмотре)"""
+    """Публикация оформленного поста в канал"""
     query = update.callback_query
     await query.answer()
     
@@ -460,7 +475,6 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет оформленного поста.")
         return
     
-    title = designed.get("title", "")
     text = designed.get("text", "")
     photo_bytes = designed.get("photo_bytes")
     
@@ -472,22 +486,23 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         import html
         text_escaped = html.escape(text)
         
-        caption = f"<b>{title}</b>\n\n{text_escaped}\n\n#Новости #Гродно"
-        
+        # Отправляем в канал
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=photo_bytes,
-            caption=caption,
+            caption=f"{text_escaped}\n\n#Новости #Гродно",
             parse_mode="HTML"
         )
         
-        print(f"✅ Пост опубликован в канал: {title[:50]}...")
+        print(f"✅ Пост опубликован в канал")
         
+        # После публикации показываем кнопки подписки и предложки новостей
         await query.message.reply_text(
             "✅ Пост опубликован в канал!",
-            reply_markup=get_publish_keyboard()
+            reply_markup=get_post_publish_keyboard()
         )
         
+        # Очищаем временные данные
         context.chat_data.pop("pending_post", None)
         context.chat_data.pop("designed_post", None)
         
@@ -589,7 +604,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
-            caption = f"<b>{news['title']}</b>\n\n{news['text']}\n\n🔗 <a href='{news['url']}'>Читать полностью</a>\n\n#Гродно #Новости"
+            import html
+            caption = f"<b>{html.escape(news['title'])}</b>\n\n{html.escape(news['text'])}\n\n🔗 <a href='{news['url']}'>Читать полностью</a>\n\n#Гродно #Новости"
             
             if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
                 await context.bot.send_photo(
@@ -606,7 +622,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             
             save_published(news['url'], news['title'])
-            await query.message.reply_text("✅ Опубликовано в канал!", reply_markup=get_publish_keyboard())
+            
+            await query.message.reply_text(
+                "✅ Опубликовано в канал!",
+                reply_markup=get_post_publish_keyboard()
+            )
             
             try:
                 await query.message.delete()
