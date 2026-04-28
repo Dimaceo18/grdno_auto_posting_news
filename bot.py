@@ -278,6 +278,7 @@ def get_publish_button():
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_publish_keyboard():
+    """Кнопки, которые отправляются В КАНАЛ вместе с постом"""
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
         [InlineKeyboardButton("📝 Прислать нам новость", url=SUGGEST_LINK)]
@@ -352,15 +353,15 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Оформить можно только фото с подписью.")
         return
     
-    text = pending.get("text", "")
-    if not text:
+    full_text = pending.get("text", "")
+    if not full_text:
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
-    title = text.split('\n')[0][:150] if text else "Пост"
-    main_text = '\n'.join(text.split('\n')[1:]) if '\n' in text else text
-    if len(main_text) > 500:
-        main_text = main_text[:500] + "..."
+    # Заголовок - первая строка
+    title = full_text.split('\n')[0][:150] if full_text else "Пост"
+    # Основной текст - всё, что после первой строки
+    main_text = '\n'.join(full_text.split('\n')[1:]) if '\n' in full_text else ""
     
     if not pending.get("photo_bytes"):
         await query.message.reply_text("❌ Нет фото. Отправьте фото заново.")
@@ -369,22 +370,25 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text("🎨 Оформляю пост...")
         
+        # Обрабатываем фото (заголовок наносится на фото)
         photo_io = process_photo(pending["photo_bytes"], title)
         
         if photo_io.getbuffer().nbytes == 0:
             raise ValueError("Фото пустое после обработки")
         
+        # Сохраняем: заголовок уже на фото, в caption тоже будет заголовок для текста
         context.chat_data["designed_post"] = {
             "title": title,
             "text": main_text,
             "photo_bytes": photo_io.getvalue()
         }
         
-        caption = f"{main_text}\n\n✅ Пост оформлен! Нажми кнопку ниже для публикации."
+        # Предпросмотр с кнопкой публикации
+        preview_text = f"📰 *{title}*\n\n{main_text[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
         
         await query.message.reply_photo(
             photo=photo_io,
-            caption=caption,
+            caption=preview_text,
             parse_mode="Markdown",
             reply_markup=get_publish_button()
         )
@@ -398,7 +402,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка оформления: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ ФОТО ====================
+# ==================== ПУБЛИКАЦИЯ ФОТО В КАНАЛ ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -409,6 +413,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет оформленного поста.")
         return
     
+    title = designed.get("title", "")
     text = designed.get("text", "")
     photo_bytes = designed.get("photo_bytes")
     
@@ -417,20 +422,20 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         return
     
     try:
-        # Отправляем в канал без хештегов
+        # Отправляем в канал с заголовком и текстом + КНОПКИ
+        caption = f"{title}\n\n{text}"
+        
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=photo_bytes,
-            caption=text,
-            parse_mode="HTML"
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=get_post_publish_keyboard()  # Кнопки в канале!
         )
         
-        print(f"✅ Пост опубликован в канал")
+        print(f"✅ Пост опубликован в канал с кнопками")
         
-        await query.message.reply_text(
-            "✅ Пост опубликован в канал!",
-            reply_markup=get_post_publish_keyboard()
-        )
+        await query.message.reply_text("✅ Пост опубликован в канал!")
         
         context.chat_data.pop("pending_post", None)
         context.chat_data.pop("designed_post", None)
@@ -444,7 +449,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         print(f"❌ Ошибка публикации: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ ВИДЕО ====================
+# ==================== ПУБЛИКАЦИЯ ВИДЕО В КАНАЛ ====================
 async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -463,20 +468,18 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     try:
-        # Отправляем видео в канал без хештегов
+        # Отправляем видео в канал с КНОПКАМИ
         await context.bot.send_video(
             chat_id=CHANNEL_ID,
             video=file_id,
             caption=text if text else " ",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_post_publish_keyboard()  # Кнопки в канале!
         )
         
-        print(f"✅ Видео опубликовано в канал")
+        print(f"✅ Видео опубликовано в канал с кнопками")
         
-        await query.message.reply_text(
-            "✅ Видео опубликовано в канал!",
-            reply_markup=get_post_publish_keyboard()
-        )
+        await query.message.reply_text("✅ Видео опубликовано в канал!")
         
         context.chat_data.pop("pending_video", None)
         
@@ -488,6 +491,39 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         print(f"❌ Ошибка публикации видео: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
+
+# ==================== ПУБЛИКАЦИЯ НОВОСТЕЙ ИЗ ПАРСИНГА ====================
+async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, news_id: str):
+    """Публикация новости из парсинга в канал"""
+    news = pending_news.get(news_id)
+    if not news:
+        return
+    
+    try:
+        caption = f"{news['title']}\n\n{news['text']}\n\n🔗 {news['url']}"
+        
+        if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=news['photo'],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        
+        save_published(news['url'], news['title'])
+        pending_news.pop(news_id, None)
+        
+    except Exception as e:
+        print(f"❌ Ошибка публикации новости: {e}")
+        raise e
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -576,42 +612,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data.startswith("publish:"):
         news_id = data.split(":")[1]
-        news = pending_news.get(news_id)
-        if not news:
-            return
-        
+        await publish_news_callback(update, context, news_id)
+        await query.message.reply_text("✅ Опубликовано в канал!", reply_markup=get_post_publish_keyboard())
         try:
-            caption = f"{news['text']}\n\n🔗 {news['url']}"
-            
-            if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=news['photo'],
-                    caption=caption,
-                    parse_mode="HTML"
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=caption,
-                    parse_mode="HTML"
-                )
-            
-            save_published(news['url'], news['title'])
-            
-            await query.message.reply_text(
-                "✅ Опубликовано в канал!",
-                reply_markup=get_post_publish_keyboard()
-            )
-            
-            try:
-                await query.message.delete()
-            except:
-                pass
-                
-            pending_news.pop(news_id, None)
-        except Exception as e:
-            await query.message.reply_text(f"❌ Ошибка: {e}")
+            await query.message.delete()
+        except:
+            pass
     
     elif data.startswith("skip:"):
         news_id = data.split(":")[1]
@@ -655,6 +661,8 @@ async def run_bot():
     await application.updater.start_polling()
     
     print("✅ Бот запущен!")
+    print("📸 Функции: парсинг новостей + оформление фото + публикация видео")
+    print("🔘 Кнопки публикуются ВМЕСТЕ с постом в канале")
     return application
 
 if __name__ == "__main__":
