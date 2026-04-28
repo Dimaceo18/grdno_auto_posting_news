@@ -121,7 +121,42 @@ async def fetch_article_text(url: str) -> str:
         return "Не удалось загрузить текст статьи."
 
 # ==================== ОБРАБОТКА ФОТО ====================
+def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[str]:
+    """Автоматический перенос текста на несколько строк"""
+    words = text.split()
+    lines = []
+    current_line = []
+    
+    for word in words:
+        test_line = ' '.join(current_line + [word])
+        try:
+            bbox = font.getbbox(test_line)
+            width = bbox[2] - bbox[0]
+        except:
+            width = len(test_line) * 20
+        
+        if width <= max_width:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(' '.join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+        if len(lines) >= max_lines:
+            break
+    
+    if current_line and len(lines) < max_lines:
+        lines.append(' '.join(current_line))
+    
+    return lines
+
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
+    """Обрабатывает фото: заголовок полностью помещается на фото с переносом"""
+    
+    if not photo_bytes or len(photo_bytes) == 0:
+        raise ValueError("Фото пустое")
+    
     print(f"🖼️ Обработка фото, размер: {len(photo_bytes) / 1024:.1f}KB")
     
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
@@ -139,6 +174,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         top = (h - new_h) // 2
         img = img.crop((0, top, w, top + new_h))
     
+    # Уменьшаем размер для контроля
     img = img.resize((1080, 1350), Image.Resampling.LANCZOS)
     img = ImageEnhance.Brightness(img).enhance(0.85)
     
@@ -160,70 +196,41 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     draw = ImageDraw.Draw(img)
     
-    # Загрузка шрифта
+    # Загрузка шрифта (увеличенный размер)
     font = None
+    font_size = 68
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
     except:
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 72)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", font_size)
         except:
             font = ImageFont.load_default()
     
     # Параметры текста
-    margin_x = int(img.width * 0.06)
-    margin_bottom = int(img.height * 0.1)
+    margin_x = int(img.width * 0.05)
+    margin_bottom = int(img.height * 0.08)
     max_text_width = img.width - 2 * margin_x
     
-    # Разбивка на строки
+    # Перенос текста
     title = title_text.upper()
-    words = title.split()
-    lines = []
-    current_line = []
-    
-    for word in words:
-        test_line = ' '.join(current_line + [word])
-        if font == ImageFont.load_default():
-            width = len(test_line) * 15
-        else:
-            bbox = font.getbbox(test_line)
-            width = bbox[2] - bbox[0]
-        
-        if width <= max_text_width:
-            current_line.append(word)
-        else:
-            if current_line:
-                lines.append(' '.join(current_line))
-                current_line = [word]
-            else:
-                lines.append(word)
-        if len(lines) >= 4:
-            break
-    
-    if current_line and len(lines) < 4:
-        lines.append(' '.join(current_line))
+    lines = wrap_text_auto(title, font, max_text_width, max_lines=6)
     
     # Вычисление высоты
-    if font == ImageFont.load_default():
-        line_height = 28
-        spacing = 10
-    else:
-        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
-        spacing = int(line_height * 0.25)
-    
+    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1] if font != ImageFont.load_default() else 35
+    spacing = int(line_height * 0.25)
     total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
+    
+    # Текст снизу
     y = img.height - margin_bottom - total_text_height
     
-    # Отрисовка с обводкой
+    # Отрисовка строк с обводкой
     for line in lines:
-        if font == ImageFont.load_default():
-            line_width = len(line) * 15
-        else:
-            bbox = font.getbbox(line)
-            line_width = bbox[2] - bbox[0]
-        
+        bbox = font.getbbox(line)
+        line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
         
+        # Чёрная обводка для читаемости
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
@@ -243,7 +250,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         quality -= 10
     
     output.seek(0)
-    print(f"✅ Фото готово: {output.tell() / (1024 * 1024):.1f}MB")
+    print(f"✅ Фото готово: {output.getbuffer().nbytes / (1024 * 1024):.2f}MB, строк текста: {len(lines)}")
     return output
 
 # ==================== КНОПКИ ====================
@@ -268,7 +275,6 @@ def get_publish_preview_keyboard():
 
 # ==================== ОБРАБОТЧИКИ РЕПОСТОВ ====================
 async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Фото с подписью"""
     message = update.message
     if not message.photo:
         return
@@ -290,18 +296,16 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["pending_post"]["photo_bytes"] = photo_bytes
         print(f"✅ Фото скачано: {len(photo_bytes)} байт")
         
-        preview_text = caption[:300] if caption else "без текста"
         await message.reply_photo(
             photo=photo.file_id,
-            caption=f"📝 *Получен пост!*\n\n{preview_text}...\n\nНажми «Оформить пост»",
+            caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nНажми «Оформить пост»",
             parse_mode="Markdown",
             reply_markup=get_post_preview_keyboard()
         )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await message.reply_text("❌ Не удалось загрузить фото.")
+        await message.reply_text("❌ Не удалось загрузить фото")
 
-# ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -314,7 +318,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     text = pending.get("text", "")
-    title = text.split('\n')[0][:100] if text else "Пост"
+    title = text.split('\n')[0][:200] if text else "Пост"
     
     if not pending.get("photo_bytes"):
         await query.message.reply_text("❌ Нет фото")
@@ -363,13 +367,23 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         caption = f"📰 *{designed['title']}*\n\n{designed['text']}\n\n#Реклама"
         
         if designed.get('photo'):
+            photo_data = designed['photo']
+            if photo_data.getbuffer().nbytes == 0:
+                raise ValueError("Фото пустое")
+            
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=designed['photo'],
+                photo=photo_data,
                 caption=caption,
                 parse_mode="Markdown"
             )
             print(f"✅ Опубликовано: {designed['title'][:50]}...")
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="Markdown"
+            )
         
         await query.message.reply_text("✅ Пост опубликован в канал!")
         context.user_data.pop("pending_post", None)
@@ -381,6 +395,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
             pass
         
     except Exception as e:
+        print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
@@ -389,7 +404,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *Бот новостей Гродно*\n\n"
         "*Доступные функции:*\n\n"
         "📰 *Парсинг новостей* — нажми кнопку ниже\n"
-        "🔄 *Оформление постов* — отправьте фото с подписью в бот\n\n"
+        "🔄 *Оформление постов* — отправьте фото с подписью\n\n"
         "*Как оформить пост:*\n"
         "1️⃣ Отправь фото с подписью\n"
         "2️⃣ Нажми «Оформить пост»\n"
@@ -528,6 +543,8 @@ async def run_bot():
     await application.updater.start_polling()
     
     print("✅ Бот запущен!")
+    print("📸 Функции: парсинг новостей + оформление репостов")
+    print("✏️ Заголовок автоматически переносится на несколько строк")
     return application
 
 if __name__ == "__main__":
