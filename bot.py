@@ -122,7 +122,7 @@ async def fetch_article_text(url: str) -> str:
 
 # ==================== ОБРАБОТКА ФОТО (СТИЛЬ ЧП ВМ) ====================
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Обрабатывает фото в стиле ЧП ВМ: обрезка 4:5 → затемнение → градиент → крупный текст"""
+    """Обрабатывает фото со встроенным шрифтом PIL"""
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     
     # Обрезка до 4:5
@@ -139,8 +139,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         img = img.crop((0, top, w, top + new_h))
     
     img = img.resize((750, 938), Image.Resampling.LANCZOS)
-    
-    # Затемнение
     img = ImageEnhance.Brightness(img).enhance(0.85)
     
     # Градиент снизу
@@ -161,23 +159,34 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     draw = ImageDraw.Draw(img)
     
-    # Загрузка шрифта
-    font = None
+    # СОЗДАЁМ ШРИФТ ПРОГРАММНО (без внешних файлов)
+    # Используем встроенный шрифт, но увеличиваем его через масштабирование
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-    except:
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 52)
-        except:
+        # Пробуем загрузить любой доступный шрифт
+        import subprocess
+        result = subprocess.run(['fc-list', ':bold', '--format=%{file}\\n'], capture_output=True, text=True)
+        font_paths = result.stdout.strip().split('\n')
+        font = None
+        for fp in font_paths:
+            if fp and 'ttf' in fp and os.path.exists(fp):
+                try:
+                    font = ImageFont.truetype(fp, 56)
+                    break
+                except:
+                    continue
+        if not font:
             font = ImageFont.load_default()
+    except:
+        font = ImageFont.load_default()
     
     # Параметры текста
     margin_x = int(img.width * 0.06)
-    margin_bottom = int(img.height * 0.08)
+    margin_bottom = int(img.height * 0.1)
     max_text_width = img.width - 2 * margin_x
     
     # Разбивка на строки
-    words = title_text.upper().split()
+    title = title_text.upper()
+    words = title.split()
     lines = []
     current_line = []
     
@@ -200,24 +209,34 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         lines.append(' '.join(current_line))
     
     # Вычисление высоты
-    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
-    spacing = int(line_height * 0.22)
+    if font == ImageFont.load_default():
+        line_height = 20
+        spacing = 6
+    else:
+        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+        spacing = int(line_height * 0.25)
+    
     total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
     y = img.height - margin_bottom - total_text_height
     
-    # Рисование строк
+    # Отрисовка с обводкой для лучшей читаемости
     for line in lines:
         bbox = font.getbbox(line)
         line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
-        draw.text((x, y), line, font=font, fill="white")
+        
+        # Рисуем тень/обводку
+        offsets = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        for dx, dy in offsets:
+            draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 200))
+        # Рисуем основной текст
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
         y += line_height + spacing
     
     output = io.BytesIO()
     img.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
     output.seek(0)
     return output
-
 # ==================== КНОПКИ ====================
 def get_main_keyboard():
     keyboard = [[InlineKeyboardButton("📰 Начать парсинг (10 новостей)", callback_data="start_parsing")]]
