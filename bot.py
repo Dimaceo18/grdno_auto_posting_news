@@ -399,14 +399,14 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
-    # Разбиваем текст на строки, сохраняя оригинальное форматирование
+    # Разбиваем текст на строки
     lines = full_text.rstrip('\n').split('\n')
     
-    # Первая строка - заголовок для фото
+    # Первая строка - заголовок (будет и на фото, и в тексте)
     title = lines[0][:150] if lines else "Пост"
     
-    # Остальной текст - сохраняем ТОЧНО как в оригинале
-    main_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+    # Весь текст полностью (с заголовком) для публикации
+    full_text_for_publish = full_text
     
     if not pending.get("photo_bytes"):
         await query.message.reply_text("❌ Нет фото. Отправьте фото заново.")
@@ -415,6 +415,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text("🎨 Оформляю пост...")
         
+        # Обрабатываем фото (заголовок наносим на фото)
         photo_io = process_photo(pending["photo_bytes"], title)
         
         if photo_io.getbuffer().nbytes == 0:
@@ -422,20 +423,16 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         context.chat_data["designed_post"] = {
             "title": title,
-            "text": main_text,
-            "photo_bytes": photo_io.getvalue(),
-            "original_text": full_text
+            "text": full_text_for_publish,  # Сохраняем ВЕСЬ текст целиком
+            "photo_bytes": photo_io.getvalue()
         }
         
-        # Предпросмотр
-        if main_text:
-            preview_caption = f"📰 *{title}*\n\n{main_text[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
-        else:
-            preview_caption = f"📰 *{title}*\n\n✅ Пост оформлен! Нажми кнопку для публикации."
+        # Предпросмотр для пользователя
+        preview_text = f"📰 *{title}*\n\n{full_text_for_publish[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
         
         await query.message.reply_photo(
             photo=photo_io,
-            caption=preview_caption,
+            caption=preview_text,
             parse_mode="Markdown",
             reply_markup=get_publish_button()
         )
@@ -460,7 +457,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет оформленного поста.")
         return
     
-    text = designed.get("text", "")
+    full_text = designed.get("text", "")  # Весь текст с заголовком
     photo_bytes = designed.get("photo_bytes")
     
     if not photo_bytes:
@@ -468,8 +465,20 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         return
     
     try:
-        # Отправляем ТОЛЬКО основной текст, заголовок уже на фото
-        caption = text if text else " "
+        # Форматируем текст: заголовок делаем жирным с помощью HTML
+        lines = full_text.split('\n')
+        if lines:
+            # Первую строку (заголовок) делаем жирной
+            title_bold = f"<b>{lines[0]}</b>"
+            # Остальной текст оставляем как есть
+            rest_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+            
+            if rest_text:
+                caption = f"{title_bold}\n\n{rest_text}"
+            else:
+                caption = title_bold
+        else:
+            caption = full_text
         
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
@@ -513,10 +522,25 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     try:
+        # Форматируем текст для видео: заголовок жирным
+        if text:
+            lines = text.split('\n')
+            if lines:
+                title_bold = f"<b>{lines[0]}</b>"
+                rest_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                if rest_text:
+                    caption = f"{title_bold}\n\n{rest_text}"
+                else:
+                    caption = title_bold
+            else:
+                caption = text
+        else:
+            caption = " "
+        
         await context.bot.send_video(
             chat_id=CHANNEL_ID,
             video=file_id,
-            caption=text if text else " ",
+            caption=caption,
             parse_mode="HTML",
             reply_markup=get_post_publish_keyboard()
         )
@@ -542,7 +566,9 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     try:
-        caption = f"{news['title']}\n\n{news['text']}\n\n🔗 {news['url']}"
+        # Для новостей тоже делаем заголовок жирным
+        title_bold = f"<b>{news['title']}</b>"
+        caption = f"{title_bold}\n\n{news['text']}\n\n🔗 {news['url']}"
         
         if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
             await context.bot.send_photo(
