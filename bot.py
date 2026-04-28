@@ -444,7 +444,6 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "photo_bytes": photo_io.getvalue()
         }
         
-        # Отправляем оформленное фото с ПОЛНЫМ текстом
         await query.message.reply_photo(
             photo=photo_io,
             caption=f"{full_text}\n\n✅ Пост оформлен!",
@@ -519,10 +518,10 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     full_text = pending.get("text", "")
-    file_id = pending.get("file_id")
+    photo_bytes = pending.get("photo_bytes")
     
-    if not file_id:
-        await query.message.reply_text("❌ Нет file_id фото")
+    if not photo_bytes:
+        await query.message.reply_text("❌ Нет фото для публикации")
         return
     
     try:
@@ -532,11 +531,15 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         lines = full_text.split('\n')
         title = lines[0] if lines else ""
         body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-        caption = format_caption(title, body)
+        
+        if body and body.strip():
+            caption = f"<b>{title}</b>\n{body}"
+        else:
+            caption = f"<b>{title}</b>"
         
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
-            photo=file_id,
+            photo=photo_bytes,
             caption=caption,
             parse_mode="HTML",
             reply_markup=get_post_publish_keyboard()
@@ -687,8 +690,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'photo': processed_photo
             }
             
-            caption = format_caption(item['title'], article_text + f"\n\n🔗 [Читать]({item['url']})")
-            caption = caption.replace("<b>", "").replace("</b>", "")  # Убираем HTML для Markdown
             caption = f"📰 *{item['title']}*\n\n{article_text}\n\n🔗 [Читать]({item['url']})"
             
             if processed_photo:
