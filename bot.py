@@ -183,65 +183,133 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, max_lines
     return lines
 
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Обрабатывает фото: обрезка 4:5 → градиент → заголовок"""
+    """
+    Обрабатывает фото в стиле ЧП ВМ:
+    - Обрезка до 4:5
+    - Яркость 0.85
+    - Градиент снизу (48% высоты, максимальная прозрачность 220)
+    - Крупный жирный текст (размер 52, шрифт Montserrat-Black или DejaVuSans-Bold)
+    - Текст по центру, отступ снизу 8%
+    """
+    # Открываем и обрабатываем изображение
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
-    img = crop_to_4x5(img)
-    img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
-    img = ImageEnhance.Brightness(img).enhance(0.9)
-    img = apply_bottom_gradient(img, GRADIENT_HEIGHT_PCT, max_alpha=220)
     
-    # Используем стандартный шрифт с увеличенным размером через ImageFont.load_default()
-    # Для лучшего вида используем встроенный шрифт
-    try:
-        # Пытаемся использовать шрифт побольше
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-    except:
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 52)
-        except:
-            # Если нет системных шрифтов, используем дефолтный
-            font = ImageFont.load_default()
+    # Обрезаем до пропорции 4:5 и ресайзим
+    w, h = img.size
+    target_ratio = 4 / 5
+    cur_ratio = w / h
+    if cur_ratio > target_ratio:
+        new_w = int(h * target_ratio)
+        left = (w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, h))
+    else:
+        new_h = int(w / target_ratio)
+        top = (h - new_h) // 2
+        img = img.crop((0, top, w, top + new_h))
+    
+    img = img.resize((750, 938), Image.Resampling.LANCZOS)
+    
+    # Затемняем изображение (brightness 0.85)
+    img = ImageEnhance.Brightness(img).enhance(0.85)
+    
+    # Накладываем градиент снизу (как в ЧП ВМ)
+    w, h = img.size
+    gh = int(h * 0.48)  # 48% высоты — как в оригинале
+    if gh > 0:
+        overlay_alpha = Image.new("L", (w, h), 0)
+        grad = Image.new("L", (1, gh), 0)
+        for y in range(gh):
+            a = int(220 * (y / max(1, gh - 1)))
+            grad.putpixel((0, y), a)
+        grad = grad.resize((w, gh))
+        overlay_alpha.paste(grad, (0, h - gh))
+        black = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+        base = img.convert("RGBA")
+        overlay = Image.composite(black, Image.new("RGBA", (w, h), (0, 0, 0, 0)), overlay_alpha)
+        img = Image.alpha_composite(base, overlay).convert("RGB")
     
     draw = ImageDraw.Draw(img)
-    margin_x = int(img.width * 0.06)
-    margin_bottom = int(img.height * 0.08)
+    
+    # Пытаемся загрузить жирный шрифт
+    font = None
+    try:
+        # Сначала пробуем Montserrat-Black (если есть)
+        font = ImageFont.truetype("Montserrat-Black.ttf", 52)
+    except:
+        try:
+            # Пробуем DejaVu Sans Bold (есть в Linux)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+        except:
+            try:
+                # Пробуем FreeSans Bold
+                font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 52)
+            except:
+                # Последний шанс — любой жирный шрифт в системе
+                import subprocess
+                result = subprocess.run(['fc-list', ':bold', '--format=%{file}\\n'], capture_output=True, text=True)
+                font_paths = result.stdout.strip().split('\n')
+                for fp in font_paths:
+                    if fp and 'ttf' in fp:
+                        try:
+                            font = ImageFont.truetype(fp, 52)
+                            break
+                        except:
+                            continue
+    
+    # Если ни один шрифт не загрузился, используем дефолтный
+    if font is None:
+        font = ImageFont.load_default()
+    
+    # Параметры отступов (как в оригинальном ЧП ВМ)
+    margin_x = int(img.width * 0.06)   # 6% слева и справа
+    margin_bottom = int(img.height * 0.08)  # 8% снизу
+    
     max_text_width = img.width - 2 * margin_x
-    text_lines = wrap_text(title_text.upper(), font, max_text_width, max_lines=4)
     
-    # Для дефолтного шрифта нужно подобрать размер иначе
-    if font == ImageFont.load_default():
-        line_height = 20
-        spacing = 4
-    else:
-        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
-        spacing = int(line_height * 0.2)
+    # Разбиваем текст на строки
+    words = title_text.upper().split()
+    lines = []
+    current_line = []
     
-    total_text_height = len(text_lines) * line_height + (len(text_lines) - 1) * spacing
+    for word in words:
+        test_line = ' '.join(current_line + [word])
+        bbox = font.getbbox(test_line)
+        width = bbox[2] - bbox[0]
+        if width <= max_text_width:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(' '.join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+        if len(lines) >= 4:  # максимум 4 строки
+            break
+    
+    if current_line and len(lines) < 4:
+        lines.append(' '.join(current_line))
+    
+    # Вычисляем высоту текстового блока
+    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+    spacing = int(line_height * 0.22)  # 22% межстрочный интервал
+    total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
+    
+    # Текст размещается снизу с отступом
     y = img.height - margin_bottom - total_text_height
     
-    for line in text_lines:
-        bbox = draw.textbbox((0, 0), line, font=font) if font != ImageFont.load_default() else (0, 0, len(line) * 15, 25)
+    # Рисуем каждую строку по центру
+    for line in lines:
+        bbox = font.getbbox(line)
         line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
         draw.text((x, y), line, font=font, fill="white")
         y += line_height + spacing
     
+    # Сохраняем результат
     output = io.BytesIO()
     img.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
     output.seek(0)
     return output
-
-# ==================== КНОПКИ ====================
-def get_main_keyboard():
-    keyboard = [[InlineKeyboardButton("📰 Начать парсинг (10 новостей)", callback_data="start_parsing")]]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_news_keyboard(news_id: str):
-    keyboard = [[
-        InlineKeyboardButton("✅ Опубликовать в канал", callback_data=f"publish:{news_id}"),
-        InlineKeyboardButton("❌ Пропустить", callback_data=f"skip:{news_id}")
-    ]]
-    return InlineKeyboardMarkup(keyboard)
 
 # ==================== ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
