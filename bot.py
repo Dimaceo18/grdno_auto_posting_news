@@ -302,6 +302,7 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text("❌ Не удалось загрузить фото.")
 
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
+# ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -309,18 +310,19 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     pending = context.user_data.get("pending_post", {})
     
     if not pending or not pending.get("text"):
-        await query.edit_message_text("❌ Отправьте фото с подписью")
+        await query.message.reply_text("❌ Отправьте фото с подписью")
         return
     
     text = pending.get("text", "")
     title = text.split('\n')[0][:100] if text else "Пост"
     
     if not pending.get("photo_bytes"):
-        await query.edit_message_text("❌ Нет фото")
+        await query.message.reply_text("❌ Нет фото")
         return
     
     try:
-        await query.edit_message_text("🎨 Оформляю...")
+        await query.message.reply_text("🎨 Оформляю пост...")
+        
         photo_io = process_photo(pending["photo_bytes"], title)
         
         context.user_data["designed_post"] = {
@@ -329,14 +331,23 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             'photo': photo_io
         }
         
-        caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Готово!"
-        await query.edit_message_media(
-            media=InputMediaPhoto(media=photo_io, caption=caption, parse_mode="Markdown"),
+        caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен!"
+        
+        await query.message.reply_photo(
+            photo=photo_io,
+            caption=caption,
+            parse_mode="Markdown",
             reply_markup=get_publish_preview_keyboard()
         )
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+            
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+        await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -345,7 +356,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
     designed = context.user_data.get("designed_post", {})
     
     if not designed:
-        await query.edit_message_text("❌ Нет поста")
+        await query.message.reply_text("❌ Нет оформленного поста")
         return
     
     try:
@@ -360,12 +371,17 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
             )
             print(f"✅ Опубликовано: {designed['title'][:50]}...")
         
-        await query.edit_message_text("✅ Пост опубликован в канал!")
+        await query.message.reply_text("✅ Пост опубликован в канал!")
         context.user_data.pop("pending_post", None)
         context.user_data.pop("designed_post", None)
         
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
