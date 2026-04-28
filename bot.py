@@ -52,7 +52,7 @@ def save_published(url: str, title: str):
 
 # ==================== ОЧИСТКА ТЕКСТА ====================
 def remove_emojis(text: str) -> str:
-    """Удаляет только смайлики, сохраняя все пробелы и абзацы"""
+    """Удаляет только смайлики"""
     if not text:
         return ""
     emoji_pattern = re.compile(
@@ -69,6 +69,13 @@ def remove_emojis(text: str) -> str:
         flags=re.UNICODE
     )
     return emoji_pattern.sub(r'', text)
+
+def format_caption(title: str, body: str) -> str:
+    """Форматирует подпись: заголовок жирным, затем одна пустая строка, затем тело"""
+    if body:
+        return f"<b>{title}</b>\n\n{body}"
+    else:
+        return f"<b>{title}</b>"
 
 # ==================== ПАРСЕРЫ ====================
 async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
@@ -258,7 +265,7 @@ def get_news_keyboard(news_id: str):
 
 def get_video_keyboard():
     keyboard = [
-        [InlineKeyboardButton("✏️ Редактировать описание", callback_data="edit_video_text")],
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_video_text")],
         [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -266,7 +273,8 @@ def get_video_keyboard():
 def get_post_preview_keyboard():
     keyboard = [
         [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
-        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_text")]
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_text")],
+        [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -290,7 +298,6 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     caption = message.caption or ""
     photo = message.photo[-1]
     
-    # Удаляем только смайлики
     cleaned_caption = remove_emojis(caption)
     
     print(f"📸 Получено фото")
@@ -430,7 +437,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ ====================
+# ==================== ПУБЛИКАЦИЯ С ОФОРМЛЕНИЕМ ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -449,16 +456,14 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         return
     
     try:
-        # Обрезаем до 1000 символов
         if len(full_text) > 1000:
             full_text = full_text[:1000] + "..."
         
-        # Заголовок жирным
+        # Форматируем: заголовок жирным, затем одна пустая строка
         lines = full_text.split('\n')
-        if lines:
-            caption = f"<b>{lines[0]}</b>\n\n" + '\n'.join(lines[1:]) if len(lines) > 1 else f"<b>{lines[0]}</b>"
-        else:
-            caption = full_text
+        title = lines[0] if lines else ""
+        body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+        caption = format_caption(title, body)
         
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
@@ -481,6 +486,55 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
+# ==================== ПУБЛИКАЦИЯ БЕЗ ОФОРМЛЕНИЯ ====================
+async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.chat_data.get("pending_post", {})
+    
+    if not pending or pending.get("type") != "photo":
+        await query.message.reply_text("❌ Нет поста для публикации")
+        return
+    
+    full_text = pending.get("text", "")
+    photo_bytes = pending.get("photo_bytes")
+    
+    if not photo_bytes:
+        await query.message.reply_text("❌ Нет фото")
+        return
+    
+    try:
+        if len(full_text) > 1000:
+            full_text = full_text[:1000] + "..."
+        
+        # Форматируем: заголовок жирным, затем одна пустая строка
+        lines = full_text.split('\n')
+        title = lines[0] if lines else ""
+        body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+        caption = format_caption(title, body)
+        
+        await context.bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=photo_bytes,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=get_post_publish_keyboard()
+        )
+        
+        await query.message.reply_text("✅ Пост опубликован в канал!")
+        
+        context.chat_data.pop("pending_post", None)
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
+
+# ==================== ПУБЛИКАЦИЯ ВИДЕО ====================
 async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -504,7 +558,9 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         
         if text:
             lines = text.split('\n')
-            caption = f"<b>{lines[0]}</b>\n\n" + '\n'.join(lines[1:]) if len(lines) > 1 else f"<b>{lines[0]}</b>"
+            title = lines[0] if lines else ""
+            body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+            caption = format_caption(title, body)
         else:
             caption = " "
         
@@ -527,6 +583,7 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
+# ==================== ПУБЛИКАЦИЯ НОВОСТЕЙ ====================
 async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, news_id: str):
     news = pending_news.get(news_id)
     if not news:
@@ -537,7 +594,7 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if len(news_text) > 1000:
             news_text = news_text[:1000] + "..."
         
-        caption = f"<b>{news['title']}</b>\n\n{news_text}\n\n🔗 {news['url']}"
+        caption = format_caption(news['title'], f"{news_text}\n\n🔗 {news['url']}")
         
         if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
             await context.bot.send_photo(
@@ -612,19 +669,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'photo': processed_photo
             }
             
-            caption = f"📰 *{item['title']}*\n\n{article_text}\n\n🔗 [Читать]({item['url']})"
+            caption = format_caption(item['title'], article_text + f"\n\n🔗 [Читать]({item['url']})")
             
             if processed_photo:
                 await query.message.reply_photo(
                     photo=processed_photo,
                     caption=caption,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=get_news_keyboard(news_id)
                 )
             else:
                 await query.message.reply_text(
                     caption,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=get_news_keyboard(news_id)
                 )
             
@@ -658,6 +715,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "publish_designed":
         await publish_designed_callback(update, context)
     
+    elif data == "publish_raw":
+        await publish_raw_callback(update, context)
+    
     elif data == "edit_text":
         await edit_text_callback(update, context)
     
@@ -679,7 +739,6 @@ async def health():
 async def run_bot():
     init_db()
     
-    # Принудительно удаляем webhook
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook()
     print("✅ Webhook удалён")
