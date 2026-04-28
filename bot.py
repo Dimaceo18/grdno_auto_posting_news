@@ -5,7 +5,7 @@ import os
 import re
 import io
 from io import StringIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 from fastapi import FastAPI
@@ -24,6 +24,7 @@ CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
 
 pending_news: Dict[str, Dict] = {}
+scheduled_posts: List[Dict] = []
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -36,7 +37,36 @@ def init_db():
                 published_at TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT,
+                photo_bytes BLOB,
+                schedule_time TIMESTAMP,
+                created_at TIMESTAMP
+            )
+        """)
     print("✅ База данных готова")
+
+def save_scheduled_post(text: str, photo_bytes: bytes, schedule_time: datetime):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_posts (text, photo_bytes, schedule_time, created_at) VALUES (?, ?, ?, ?)",
+            (text, photo_bytes, schedule_time, datetime.now())
+        )
+
+def get_pending_scheduled_posts() -> List[Dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        result = conn.execute(
+            "SELECT id, text, photo_bytes, schedule_time FROM scheduled_posts WHERE schedule_time <= ?",
+            (datetime.now(),)
+        ).fetchall()
+        return [dict(row) for row in result]
+
+def delete_scheduled_post(post_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (post_id,))
 
 def is_already_published(url: str) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
@@ -272,14 +302,37 @@ def get_post_preview_keyboard():
     keyboard = [
         [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
         [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_text")],
-        [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")]
+        [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_menu")]
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_schedule_keyboard():
+    """Кнопки для выбора времени отложенной публикации"""
+    schedule_times = [
+        ("Через 30 мин", "30min"),
+        ("9:05", "9:05"), ("10:05", "10:05"), ("10:06", "10:06"), ("11:07", "11:07"),
+        ("12:08", "12:08"), ("13:09", "13:09"), ("14:10", "14:10"), ("15:11", "15:11"),
+        ("16:12", "16:12"), ("17:13", "17:13"), ("18:14", "18:14"), ("19:07", "19:07"),
+        ("20:08", "20:08"), ("21:09", "21:09"), ("22:11", "22:11"), ("22:45", "22:45")
+    ]
+    keyboard = []
+    row = []
+    for i, (label, value) in enumerate(schedule_times):
+        row.append(InlineKeyboardButton(label, callback_data=f"schedule:{value}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_preview")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_designed_post_keyboard():
     keyboard = [
         [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")],
-        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")]
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_designed")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -457,6 +510,117 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
+
+# ==================== ОТЛОЖЕННАЯ ПУБЛИКАЦИЯ ====================
+async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.edit_reply_markup(reply_markup=get_schedule_keyboard())
+
+async def back_to_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.chat_data.get("pending_post", {})
+    text = pending.get("text", "")
+    
+    await query.message.edit_caption(
+        caption=text if text else " ",
+        parse_mode="HTML",
+        reply_markup=get_post_preview_keyboard()
+    )
+
+async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    time_value = query.data.split(":")[1]
+    
+    # Определяем время публикации
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        # Парсим время HH:MM
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = f"{publish_time.strftime('%H:%M')} ({publish_time.strftime('%d.%m')})"
+    
+    # Получаем текущий пост
+    pending = context.chat_data.get("pending_post", {})
+    full_text = pending.get("text", "")
+    photo_bytes = pending.get("photo_bytes")
+    
+    if not photo_bytes:
+        await query.message.reply_text("❌ Нет данных для отложенной публикации")
+        return
+    
+    # Сохраняем в БД
+    save_scheduled_post(full_text, photo_bytes, publish_time)
+    
+    await query.message.reply_text(
+        f"✅ Пост запланирован на {time_str}\n\n"
+        f"Он будет автоматически опубликован в канал в указанное время."
+    )
+    
+    # Очищаем временные данные
+    context.chat_data.pop("pending_post", None)
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+async def schedule_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.edit_reply_markup(reply_markup=get_schedule_keyboard())
+    context.user_data["scheduling_designed"] = True
+
+async def schedule_designed_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    time_value = query.data.split(":")[1]
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = f"{publish_time.strftime('%H:%M')} ({publish_time.strftime('%d.%m')})"
+    
+    designed = context.chat_data.get("designed_post", {})
+    full_text = designed.get("text", "")
+    photo_bytes = designed.get("photo_bytes")
+    
+    if not photo_bytes:
+        await query.message.reply_text("❌ Нет данных для отложенной публикации")
+        return
+    
+    save_scheduled_post(full_text, photo_bytes, publish_time)
+    
+    await query.message.reply_text(
+        f"✅ Оформленный пост запланирован на {time_str}\n\n"
+        f"Он будет автоматически опубликован в канал в указанное время."
+    )
+    
+    context.chat_data.pop("designed_post", None)
+    context.user_data["scheduling_designed"] = False
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
 
 # ==================== ПУБЛИКАЦИЯ ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -637,6 +801,39 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         print(f"❌ Ошибка: {e}")
 
+# ==================== ПЛАНИРОВЩИК ====================
+async def check_scheduled_posts(app: Application):
+    """Проверяет и публикует отложенные посты"""
+    while True:
+        try:
+            posts = get_pending_scheduled_posts()
+            for post in posts:
+                photo_bytes = post["photo_bytes"]
+                text = post["text"]
+                
+                if len(text) > 1000:
+                    text = text[:1000] + "..."
+                
+                lines = text.split('\n')
+                title = lines[0] if lines else ""
+                body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                caption = format_caption(title, body)
+                
+                await app.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=photo_bytes,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=get_post_publish_keyboard()
+                )
+                
+                delete_scheduled_post(post["id"])
+                print(f"✅ Опубликован отложенный пост")
+        except Exception as e:
+            print(f"❌ Ошибка в планировщике: {e}")
+        
+        await asyncio.sleep(60)  # Проверяем каждую минуту
+
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -644,6 +841,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📰 *Парсинг новостей* — нажми кнопку\n"
         "🖼️ *Фото* — отправьте фото с подписью\n"
         "📹 *Видео* — отправьте видео с подписью\n\n"
+        "*Отложенная публикация:*\n"
+        "⏰ Можно отложить пост на нужное время\n\n"
         "👇 Нажми кнопку",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -746,13 +945,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "edit_designed_text":
         await edit_designed_text_callback(update, context)
+    
+    elif data == "schedule_menu":
+        await schedule_menu_callback(update, context)
+    
+    elif data == "back_to_preview":
+        await back_to_preview_callback(update, context)
+    
+    elif data.startswith("schedule:"):
+        if context.user_data.get("scheduling_designed"):
+            await schedule_designed_time_callback(update, context)
+        else:
+            await schedule_post_callback(update, context)
+    
+    elif data == "schedule_designed":
+        await schedule_designed_callback(update, context)
 
 # ==================== ВЕБ-СЕРВЕР ====================
 app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot"}
+    return {"status": "ok", "bot": "Grodno News Bot with scheduler"}
 
 @app.get("/health")
 async def health():
@@ -776,9 +990,13 @@ async def run_bot():
     
     await application.initialize()
     await application.start()
+    
+    # Запускаем планировщик отложенных постов
+    asyncio.create_task(check_scheduled_posts(application))
+    
     await application.updater.start_polling()
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен с поддержкой отложенных постов!")
 
 if __name__ == "__main__":
     import threading
