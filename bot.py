@@ -278,8 +278,12 @@ def get_post_preview_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_publish_button():
-    keyboard = [[InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")]]
+def get_designed_post_keyboard():
+    """Кнопки после оформления поста"""
+    keyboard = [
+        [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")],
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_publish_keyboard():
@@ -361,6 +365,12 @@ async def edit_video_text_callback(update: Update, context: ContextTypes.DEFAULT
     context.user_data["waiting_for_edit"] = "video"
     await query.message.reply_text("✏️ Отправьте новый текст для видео. Или /cancel для отмены.")
 
+async def edit_designed_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["waiting_for_edit"] = "designed"
+    await query.message.reply_text("✏️ Отправьте новый текст для поста. Или /cancel для отмены.")
+
 async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     edit_type = context.user_data.get("waiting_for_edit")
     if not edit_type:
@@ -381,6 +391,21 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pending["text"] = new_text
             context.chat_data["pending_video"] = pending
             await update.message.reply_text("✅ Текст обновлён!", reply_markup=get_video_keyboard())
+    
+    elif edit_type == "designed":
+        designed = context.chat_data.get("designed_post", {})
+        if designed:
+            designed["text"] = new_text
+            context.chat_data["designed_post"] = designed
+            # Показываем предпросмотр с обновлённым текстом
+            photo_bytes = designed.get("photo_bytes")
+            if photo_bytes:
+                await update.message.reply_photo(
+                    photo=photo_bytes,
+                    caption=f"{new_text[:300]}...\n\n✅ Текст обновлён! Нажми кнопку для публикации.",
+                    parse_mode="HTML",
+                    reply_markup=get_designed_post_keyboard()
+                )
     
     context.user_data["waiting_for_edit"] = None
 
@@ -426,7 +451,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             photo=photo_io,
             caption=f"{full_text[:300]}...\n\n✅ Пост оформлен!",
             parse_mode="HTML",
-            reply_markup=get_publish_button()
+            reply_markup=get_designed_post_keyboard()
         )
         
         try:
@@ -723,6 +748,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "edit_video_text":
         await edit_video_text_callback(update, context)
+    
+    elif data == "edit_designed_text":
+        await edit_designed_text_callback(update, context)
 
 # ==================== ВЕБ-СЕРВЕР ====================
 app = FastAPI()
