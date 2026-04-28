@@ -196,7 +196,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     draw = ImageDraw.Draw(img)
     
-    # Загрузка шрифта (увеличенный размер)
+    # Загрузка шрифта
     font = None
     font_size = 68
     try:
@@ -217,20 +217,27 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     lines = wrap_text_auto(title, font, max_text_width, max_lines=6)
     
     # Вычисление высоты
-    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1] if font != ImageFont.load_default() else 35
-    spacing = int(line_height * 0.25)
-    total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
+    if font == ImageFont.load_default():
+        line_height = 35
+        spacing = 10
+    else:
+        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+        spacing = int(line_height * 0.25)
     
-    # Текст снизу
+    total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
     y = img.height - margin_bottom - total_text_height
     
     # Отрисовка строк с обводкой
     for line in lines:
-        bbox = font.getbbox(line)
-        line_width = bbox[2] - bbox[0]
+        if font == ImageFont.load_default():
+            line_width = len(line) * 20
+        else:
+            bbox = font.getbbox(line)
+            line_width = bbox[2] - bbox[0]
+        
         x = (img.width - line_width) // 2
         
-        # Чёрная обводка для читаемости
+        # Чёрная обводка
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
@@ -250,7 +257,11 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         quality -= 10
     
     output.seek(0)
-    print(f"✅ Фото готово: {output.getbuffer().nbytes / (1024 * 1024):.2f}MB, строк текста: {len(lines)}")
+    
+    if output.getbuffer().nbytes == 0:
+        raise ValueError("Результирующий файл пустой")
+    
+    print(f"✅ Фото готово: {output.getbuffer().nbytes / (1024 * 1024):.2f}MB, строк: {len(lines)}")
     return output
 
 # ==================== КНОПКИ ====================
@@ -327,7 +338,15 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text("🎨 Оформляю пост...")
         
+        print(f"📸 Входящее фото: {len(pending['photo_bytes'])} байт")
+        
         photo_io = process_photo(pending["photo_bytes"], title)
+        
+        photo_size = photo_io.getbuffer().nbytes
+        print(f"📸 Обработанное фото: {photo_size} байт")
+        
+        if photo_size == 0:
+            raise ValueError("Обработанное фото пустое")
         
         context.user_data["designed_post"] = {
             'title': title,
@@ -350,7 +369,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
             
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка оформления: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -368,16 +387,25 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         
         if designed.get('photo'):
             photo_data = designed['photo']
-            if photo_data.getbuffer().nbytes == 0:
-                raise ValueError("Фото пустое")
+            photo_size = photo_data.getbuffer().nbytes if hasattr(photo_data, 'getbuffer') else len(photo_data.getvalue())
             
-            await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=photo_data,
-                caption=caption,
-                parse_mode="Markdown"
-            )
-            print(f"✅ Опубликовано: {designed['title'][:50]}...")
+            print(f"📸 Размер фото перед отправкой: {photo_size} байт")
+            
+            if photo_size == 0:
+                print("⚠️ Фото пустое, отправляю только текст")
+                await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=caption,
+                    parse_mode="Markdown"
+                )
+            else:
+                await context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=photo_data,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+                print(f"✅ Опубликовано с фото: {designed['title'][:50]}...")
         else:
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
@@ -395,7 +423,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
             pass
         
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка публикации: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
@@ -489,15 +517,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             caption = f"📰 *{news['title']}*\n\n{news['text']}\n\n🔗 [Читать]({news['url']})\n\n#Гродно #Новости"
             
-            if news.get('photo'):
+            if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
                 await context.bot.send_photo(
                     chat_id=CHANNEL_ID,
                     photo=news['photo'],
                     caption=caption,
                     parse_mode="Markdown"
                 )
+                print(f"✅ Опубликовано с фото: {news['title'][:50]}...")
             else:
-                await context.bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="Markdown")
+                await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=caption,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
             
             save_published(news['url'], news['title'])
             await query.edit_message_caption(caption="✅ Опубликовано!")
@@ -544,7 +578,6 @@ async def run_bot():
     
     print("✅ Бот запущен!")
     print("📸 Функции: парсинг новостей + оформление репостов")
-    print("✏️ Заголовок автоматически переносится на несколько строк")
     return application
 
 if __name__ == "__main__":
