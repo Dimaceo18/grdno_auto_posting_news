@@ -70,7 +70,6 @@ def remove_emojis(text: str) -> str:
     return emoji_pattern.sub(r'', text)
 
 def format_caption(title: str, body: str) -> str:
-    """Форматирует подпись: заголовок жирным, затем один перенос строки"""
     if body and body.strip():
         return f"<b>{title}</b>\n{body}"
     else:
@@ -518,10 +517,10 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     full_text = pending.get("text", "")
-    photo_bytes = pending.get("photo_bytes")
+    file_id = pending.get("file_id")
     
-    if not photo_bytes:
-        await query.message.reply_text("❌ Нет фото для публикации")
+    if not file_id:
+        await query.message.reply_text("❌ Нет file_id фото")
         return
     
     try:
@@ -539,7 +538,7 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
-            photo=photo_bytes,
+            photo=file_id,
             caption=caption,
             parse_mode="HTML",
             reply_markup=get_post_publish_keyboard()
