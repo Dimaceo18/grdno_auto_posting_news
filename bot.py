@@ -71,9 +71,9 @@ def remove_emojis(text: str) -> str:
     return emoji_pattern.sub(r'', text)
 
 def format_caption(title: str, body: str) -> str:
-    """Форматирует подпись: заголовок жирным, затем одна пустая строка, затем тело"""
-    if body:
-        return f"<b>{title}</b>\n\n{body}"
+    """Форматирует подпись: заголовок жирным, затем одна пустая строка (только если есть тело)"""
+    if body and body.strip():
+        return f"<b>{title}</b>\n{body}"
     else:
         return f"<b>{title}</b>"
 
