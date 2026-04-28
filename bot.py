@@ -383,7 +383,7 @@ async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_for_edit"] = None
     await update.message.reply_text("✅ Редактирование отменено.")
 
-# ==================== ОФОРМЛЕНИЕ ====================
+# ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -399,9 +399,13 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
-    # Получаем заголовок (первая строка) и остальной текст БЕЗ изменений форматирования
-    lines = full_text.split('\n')
+    # Разбиваем текст на строки, сохраняя оригинальное форматирование
+    lines = full_text.rstrip('\n').split('\n')
+    
+    # Первая строка - заголовок для фото
     title = lines[0][:150] if lines else "Пост"
+    
+    # Остальной текст - сохраняем ТОЧНО как в оригинале
     main_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
     
     if not pending.get("photo_bytes"):
@@ -419,14 +423,19 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         context.chat_data["designed_post"] = {
             "title": title,
             "text": main_text,
-            "photo_bytes": photo_io.getvalue()
+            "photo_bytes": photo_io.getvalue(),
+            "original_text": full_text
         }
         
-        preview_text = f"📰 *{title}*\n\n{main_text[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
+        # Предпросмотр
+        if main_text:
+            preview_caption = f"📰 *{title}*\n\n{main_text[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
+        else:
+            preview_caption = f"📰 *{title}*\n\n✅ Пост оформлен! Нажми кнопку для публикации."
         
         await query.message.reply_photo(
             photo=photo_io,
-            caption=preview_text,
+            caption=preview_caption,
             parse_mode="Markdown",
             reply_markup=get_publish_button()
         )
@@ -451,7 +460,6 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет оформленного поста.")
         return
     
-    title = designed.get("title", "")
     text = designed.get("text", "")
     photo_bytes = designed.get("photo_bytes")
     
@@ -460,7 +468,8 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         return
     
     try:
-        caption = f"{title}\n\n{text}" if text else title
+        # Отправляем ТОЛЬКО основной текст, заголовок уже на фото
+        caption = text if text else " "
         
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
@@ -690,8 +699,8 @@ async def run_bot():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel_edit))
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_forwarded_photo))
-    application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, handle_forwarded_video))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_forwarded_photo))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_forwarded_video))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edited_text))
     
     await application.initialize()
@@ -699,7 +708,6 @@ async def run_bot():
     await application.updater.start_polling()
     
     print("✅ Бот запущен!")
-    print("📸 Функции: парсинг новостей + оформление фото + публикация видео")
     return application
 
 if __name__ == "__main__":
