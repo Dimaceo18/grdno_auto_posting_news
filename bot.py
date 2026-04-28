@@ -213,7 +213,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     total_text_height = len(lines) * line_height + (len(lines) - 1) * spacing
     y = img.height - margin_bottom - total_text_height
     
-    # Отрисовка с обводкой для лучшей читаемости
+    # Отрисовка с обводкой
     for line in lines:
         if font == ImageFont.load_default():
             line_width = len(line) * 15
@@ -223,11 +223,11 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         
         x = (img.width - line_width) // 2
         
-        # Рисуем чёрную обводку (тень) со всех сторон
+        # Чёрная обводка
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
-        # Рисуем основной белый текст
+        # Белый текст
         draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
         y += line_height + spacing
     
@@ -256,42 +256,47 @@ def get_publish_preview_keyboard():
     keyboard = [[InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")]]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== ОБРАБОТЧИК РЕПОСТОВ ====================
-async def handle_forwarded_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает пересланные сообщения (посты)"""
+# ==================== ОБРАБОТЧИКИ РЕПОСТОВ ====================
+async def handle_forwarded_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Текстовый репост"""
     message = update.message
-    
-    if not message.text and not message.caption:
-        await message.reply_text("❌ Пожалуйста, перешлите пост с текстом и фото (или просто текст).")
+    if not message.text:
         return
     
     if "pending_post" not in context.user_data:
         context.user_data["pending_post"] = {}
     
-    text = message.text or message.caption or ""
-    context.user_data["pending_post"]["text"] = text
+    context.user_data["pending_post"]["text"] = message.text
+    context.user_data["pending_post"]["has_photo"] = False
     
-    if message.photo:
-        photo = message.photo[-1]
-        context.user_data["pending_post"]["has_photo"] = True
-        
-        file = await context.bot.get_file(photo.file_id)
-        photo_bytes = await file.download_as_bytearray()
-        context.user_data["pending_post"]["photo_bytes"] = photo_bytes
-        
-        await message.reply_photo(
-            photo=photo_bytes,
-            caption=f"📝 *Получен пост для оформления!*\n\n{text[:300]}...\n\nНажми кнопку ниже, чтобы оформить.",
-            parse_mode="Markdown",
-            reply_markup=get_post_preview_keyboard()
-        )
-    else:
-        context.user_data["pending_post"]["has_photo"] = False
-        await message.reply_text(
-            f"📝 *Получен текст для оформления!*\n\n{text[:300]}...\n\nНажми кнопку ниже, чтобы оформить.\n\n*⚠️ Для лучшего результата отправляйте пост с фото.*",
-            parse_mode="Markdown",
-            reply_markup=get_post_preview_keyboard()
-        )
+    await message.reply_text(
+        f"📝 *Получен текст для оформления!*\n\n{message.text[:300]}...\n\nНажми «Оформить пост»",
+        parse_mode="Markdown",
+        reply_markup=get_post_preview_keyboard()
+    )
+
+async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Фото с подписью"""
+    message = update.message
+    caption = message.caption or ""
+    photo = message.photo[-1]
+    
+    if "pending_post" not in context.user_data:
+        context.user_data["pending_post"] = {}
+    
+    context.user_data["pending_post"]["text"] = caption
+    context.user_data["pending_post"]["has_photo"] = True
+    
+    file = await context.bot.get_file(photo.file_id)
+    photo_bytes = await file.download_as_bytearray()
+    context.user_data["pending_post"]["photo_bytes"] = photo_bytes
+    
+    await message.reply_photo(
+        photo=photo_bytes,
+        caption=f"📝 *Получен пост для оформления!*\n\n{caption[:300]}...\n\nНажми «Оформить пост»",
+        parse_mode="Markdown",
+        reply_markup=get_post_preview_keyboard()
+    )
 
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,7 +306,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     pending = context.user_data.get("pending_post", {})
     
     if not pending or not pending.get("text"):
-        await query.edit_message_text("❌ Нет данных для оформления.")
+        await query.edit_message_text("❌ Нет данных для оформления. Пожалуйста, отправьте пост заново.")
         return
     
     text = pending.get("text", "")
@@ -315,7 +320,9 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             photo_io = process_photo(pending["photo_bytes"], title)
             print(f"✅ Пост оформлен: {title[:50]}...")
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Ошибка оформления фото: {e}")
+            await query.edit_message_text(f"⚠️ Ошибка при оформлении фото: {e}")
+            return
     
     context.user_data["designed_post"] = {
         'title': title,
@@ -323,7 +330,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         'photo': photo_io
     }
     
-    caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен!"
+    caption = f"📰 *{title}*\n\n{text[:500]}...\n\n✅ Пост оформлен! Нажми «Опубликовать» для отправки в канал."
     
     if photo_io:
         await query.edit_message_media(
@@ -333,15 +340,15 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.edit_message_text(caption, parse_mode="Markdown", reply_markup=get_publish_preview_keyboard())
 
-# ==================== ПУБЛИКАЦИЯ ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Публикует оформленный пост в канал"""
     query = update.callback_query
     await query.answer()
     
     designed = context.user_data.get("designed_post", {})
     
     if not designed:
-        await query.edit_message_text("❌ Нет оформленного поста.")
+        await query.edit_message_text("❌ Нет оформленного поста для публикации.")
         return
     
     try:
@@ -354,6 +361,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
                 caption=caption,
                 parse_mode="Markdown"
             )
+            print(f"✅ Опубликован оформленный пост в канал: {designed['title'][:50]}...")
         else:
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
@@ -361,11 +369,12 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
                 parse_mode="Markdown"
             )
         
-        await query.edit_message_text("✅ Пост опубликован в канал!")
+        await query.edit_message_text("✅ Пост успешно опубликован в канал!")
         context.user_data.pop("pending_post", None)
         context.user_data.pop("designed_post", None)
+        
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.edit_message_text(f"❌ Ошибка публикации: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,7 +382,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *Бот новостей Гродно*\n\n"
         "*Доступные функции:*\n\n"
         "📰 *Парсинг новостей* — нажми кнопку ниже\n"
-        "🔄 *Репост поста* — перешлите любой пост в бот\n\n"
+        "🔄 *Оформление постов* — перешлите любой пост в бот (текст или фото с подписью)\n\n"
+        "*Фото автоматически обрабатываются:*\n"
+        "• Обрезка до 4:5\n"
+        "• Затемнение и градиент\n"
+        "• Крупный заголовок с обводкой\n\n"
         "👇 *Нажми кнопку для парсинга новостей*",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -384,7 +397,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == "start_parsing":
-        await query.edit_message_text("⏳ Парсинг новостей...")
+        await query.edit_message_text("⏳ Парсинг новостей... Загружаю 10 последних материалов...")
         
         news_items = await fetch_news_from_csv(10)
         if not news_items:
@@ -395,6 +408,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, item in enumerate(news_items):
             if is_already_published(item['url']):
+                await query.message.reply_text(f"⏭️ *Уже было опубликовано:*\n{item['title'][:80]}...", parse_mode="Markdown")
                 continue
             
             status_msg = await query.message.reply_text(f"📡 Загружаю: {item['title'][:60]}...")
@@ -407,12 +421,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             processed_photo = None
             if image_url:
                 try:
+                    await status_msg.edit_text(f"📸 Обрабатываю фото...")
                     async with httpx.AsyncClient(timeout=20.0) as client:
                         resp = await client.get(image_url)
                         if resp.status_code == 200:
                             processed_photo = process_photo(resp.content, item['title'])
+                            print(f"✅ Фото обработано: {item['title'][:50]}...")
                 except Exception as e:
-                    print(f"❌ Ошибка: {e}")
+                    print(f"❌ Ошибка обработки фото: {e}")
             
             pending_news[news_id] = {
                 'title': item['title'],
@@ -453,15 +469,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = f"📰 *{news['title']}*\n\n{news['text']}\n\n🔗 [Читать полностью]({news['url']})\n\n#Гродно #Новости"
             
             if news.get('photo'):
-                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=news['photo'], caption=caption, parse_mode="Markdown")
+                await context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=news['photo'],
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+                print(f"✅ Опубликовано с обработанным фото: {news['title'][:50]}...")
             else:
-                await context.bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="Markdown")
+                await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=caption,
+                    parse_mode="Markdown"
+                )
             
             save_published(news['url'], news['title'])
-            await query.edit_message_caption(caption="✅ Опубликовано!")
+            await query.edit_message_caption(caption="✅ Опубликовано в канал!")
             pending_news.pop(news_id, None)
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка: {e}")
+            await query.edit_message_text(f"❌ Ошибка публикации: {e}")
     
     elif data.startswith("skip:"):
         news_id = data.split(":")[1]
@@ -494,7 +520,8 @@ async def run_bot():
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_forwarded_post))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_forwarded_text))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_forwarded_photo))
     
     await application.initialize()
     await application.start()
