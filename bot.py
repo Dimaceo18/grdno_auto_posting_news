@@ -7,7 +7,6 @@ import io
 from io import StringIO
 from datetime import datetime
 from typing import List, Dict, Optional
-from urllib.parse import urljoin
 
 from fastapi import FastAPI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,7 +25,6 @@ DB_PATH = "news.db"
 TARGET_WIDTH = 750
 TARGET_HEIGHT = 938
 GRADIENT_HEIGHT_PCT = 0.48
-FONT_PATH = "Montserrat-Black.ttf"
 
 # Хранилище
 pending_news: Dict[str, Dict] = {}
@@ -70,7 +68,6 @@ async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
                 news_list.append({
                     'url': row['Link'],
                     'title': row.get('Title', ''),
-                    'description': row.get('Description', ''),
                     'published_at': row.get('Date', datetime.now().isoformat()),
                 })
             return news_list[:limit]
@@ -79,35 +76,25 @@ async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
         return []
 
 async def fetch_article_image(url: str) -> Optional[str]:
-    """Ищет главное изображение статьи через og:image"""
+    """Ищет главное изображение статьи"""
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             response = await client.get(url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             response.raise_for_status()
-            html_content = response.text
-        
-        soup = BeautifulSoup(html_content, 'html.parser')
+            soup = BeautifulSoup(response.text, 'html.parser')
         
         og_image = soup.find('meta', property='og:image')
         if og_image and og_image.get('content'):
             image_url = og_image['content']
             if image_url.startswith('//'):
                 image_url = 'https:' + image_url
-            print(f"✅ Найдено фото: {image_url[:80]}...")
             return image_url
         
-        twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
-        if twitter_image and twitter_image.get('content'):
-            image_url = twitter_image['content']
-            print(f"✅ Найдено фото (twitter): {image_url[:80]}...")
-            return image_url
-        
-        print(f"⚠️ Фото не найдено для {url}")
         return None
     except Exception as e:
-        print(f"❌ Ошибка поиска фото {url}: {e}")
+        print(f"❌ Ошибка поиска фото: {e}")
         return None
 
 async def fetch_article_text(url: str) -> str:
@@ -124,11 +111,7 @@ async def fetch_article_text(url: str) -> str:
             tag.decompose()
         
         article = soup.find('article') or soup.find('div', class_=re.compile(r'(content|post-content|entry-content)'))
-        
-        if article:
-            paragraphs = article.find_all('p')
-        else:
-            paragraphs = soup.find_all('p')
+        paragraphs = article.find_all('p') if article else soup.find_all('p')
         
         text_parts = []
         for p in paragraphs:
@@ -137,13 +120,12 @@ async def fetch_article_text(url: str) -> str:
                 text_parts.append(text)
         
         full_text = '\n\n'.join(text_parts[:15]) if text_parts else "Текст статьи не найден."
-        
         if len(full_text) > 800:
             full_text = full_text[:800] + "\n\n...(продолжение на сайте)"
         
         return full_text
     except Exception as e:
-        print(f"❌ Ошибка получения текста {url}: {e}")
+        print(f"❌ Ошибка получения текста: {e}")
         return "Не удалось загрузить текст статьи."
 
 # ==================== ОБРАБОТКА ФОТО ====================
@@ -208,26 +190,37 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     img = ImageEnhance.Brightness(img).enhance(0.9)
     img = apply_bottom_gradient(img, GRADIENT_HEIGHT_PCT, max_alpha=220)
     
+    # Используем стандартный шрифт с увеличенным размером через ImageFont.load_default()
+    # Для лучшего вида используем встроенный шрифт
     try:
-        if os.path.exists(FONT_PATH):
-            font = ImageFont.truetype(FONT_PATH, 52)
-        else:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+        # Пытаемся использовать шрифт побольше
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
     except:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf", 52)
+        except:
+            # Если нет системных шрифтов, используем дефолтный
+            font = ImageFont.load_default()
     
     draw = ImageDraw.Draw(img)
     margin_x = int(img.width * 0.06)
     margin_bottom = int(img.height * 0.08)
     max_text_width = img.width - 2 * margin_x
     text_lines = wrap_text(title_text.upper(), font, max_text_width, max_lines=4)
-    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
-    spacing = int(line_height * 0.2)
+    
+    # Для дефолтного шрифта нужно подобрать размер иначе
+    if font == ImageFont.load_default():
+        line_height = 20
+        spacing = 4
+    else:
+        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+        spacing = int(line_height * 0.2)
+    
     total_text_height = len(text_lines) * line_height + (len(text_lines) - 1) * spacing
     y = img.height - margin_bottom - total_text_height
     
     for line in text_lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
+        bbox = draw.textbbox((0, 0), line, font=font) if font != ImageFont.load_default() else (0, 0, len(line) * 15, 25)
         line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
         draw.text((x, y), line, font=font, fill="white")
@@ -284,13 +277,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             status_msg = await query.message.reply_text(f"📡 Загружаю: {item['title'][:60]}...")
             
-            # Получаем фото и текст
             image_url = await fetch_article_image(item['url'])
             article_text = await fetch_article_text(item['url'])
             
             news_id = f"{i}_{abs(hash(item['url']))}"
             
-            # Обрабатываем фото, если есть
             processed_photo = None
             if image_url:
                 try:
@@ -307,15 +298,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'title': item['title'],
                 'url': item['url'],
                 'text': article_text,
-                'photo': processed_photo,
-                'image_url': image_url  # сохраняем на случай, если обработка не удалась
+                'photo': processed_photo
             }
             
             caption = f"📰 *{item['title']}*\n\n{article_text}\n\n🔗 [Читать на сайте]({item['url']})"
             
             await status_msg.delete()
             
-            # Отправляем с обработанным фото или без
             if processed_photo:
                 await query.message.reply_photo(
                     photo=processed_photo,
@@ -350,25 +339,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=caption,
                     parse_mode="Markdown"
                 )
-                print(f"✅ Опубликовано с ОБРАБОТАННЫМ фото: {news['title'][:50]}...")
-            elif news.get('image_url'):
-                # Резерв: отправляем оригинальное фото
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.get(news['image_url'])
-                    if resp.status_code == 200:
-                        await context.bot.send_photo(
-                            chat_id=CHANNEL_ID,
-                            photo=resp.content,
-                            caption=caption,
-                            parse_mode="Markdown"
-                        )
-                        print(f"✅ Опубликовано с оригинальным фото: {news['title'][:50]}...")
-                    else:
-                        await context.bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=caption,
-                            parse_mode="Markdown"
-                        )
+                print(f"✅ Опубликовано с обработанным фото: {news['title'][:50]}...")
             else:
                 await context.bot.send_message(
                     chat_id=CHANNEL_ID,
