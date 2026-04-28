@@ -50,29 +50,25 @@ def save_published(url: str, title: str):
             (url, title, datetime.now())
         )
 
-# ==================== ОЧИСТКА ТЕКСТА (ТОЛЬКО СМАЙЛИКИ) ====================
+# ==================== ОЧИСТКА ТЕКСТА ====================
 def remove_emojis(text: str) -> str:
     """Удаляет только смайлики, сохраняя все пробелы и абзацы"""
     if not text:
         return ""
-    
-    # Регулярное выражение для удаления emoji
     emoji_pattern = re.compile(
         "["
-        "\U0001F600-\U0001F64F"  # смайлики
-        "\U0001F300-\U0001F5FF"  # символы
-        "\U0001F680-\U0001F6FF"  # транспорт
-        "\U0001F1E0-\U0001F1FF"  # флаги
+        "\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF"
         "\U00002702-\U000027B0"
         "\U000024C2-\U0001F251"
-        "\U0001F900-\U0001F9FF"  # дополнительные смайлики
-        "\U0001FA70-\U0001FAFF"  # новые эмодзи
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA70-\U0001FAFF"
         "]+",
         flags=re.UNICODE
     )
-    text = emoji_pattern.sub(r'', text)
-    
-    return text
+    return emoji_pattern.sub(r'', text)
 
 # ==================== ПАРСЕРЫ ====================
 async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
@@ -285,7 +281,7 @@ def get_post_publish_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== ОБРАБОТЧИКИ ====================
+# ==================== ОБРАБОТЧИКИ РЕПОСТОВ ====================
 async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message.photo:
@@ -294,25 +290,22 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     caption = message.caption or ""
     photo = message.photo[-1]
     
-    # Удаляем только смайлики, сохраняем все пробелы и абзацы
+    # Удаляем только смайлики
     cleaned_caption = remove_emojis(caption)
     
-    print(f"📸 Получено фото. ID: {photo.file_id}")
+    print(f"📸 Получено фото")
     
     context.chat_data["pending_post"] = {
         "type": "photo",
         "text": cleaned_caption,
-        "file_id": photo.file_id,
-        "original_text": caption
+        "file_id": photo.file_id
     }
     
     try:
         file = await context.bot.get_file(photo.file_id)
         photo_bytes = await file.download_as_bytearray()
         context.chat_data["pending_post"]["photo_bytes"] = photo_bytes
-        print(f"✅ Фото скачано: {len(photo_bytes)} байт")
         
-        # Отправляем очищенный текст (без смайликов, с сохранением форматирования)
         await message.reply_photo(
             photo=photo.file_id,
             caption=cleaned_caption if cleaned_caption else " ",
@@ -321,7 +314,7 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await message.reply_text(f"❌ Не удалось загрузить фото: {e}")
+        await message.reply_text(f"❌ Не удалось загрузить фото")
 
 async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -329,19 +322,16 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     caption = message.caption or ""
-    
-    # Удаляем только смайлики, сохраняем все пробелы и абзацы
-    cleaned_caption = remove_emojis(caption)
-    
     video = message.video
     
-    print(f"📹 Получено видео. ID: {video.file_id}")
+    cleaned_caption = remove_emojis(caption)
+    
+    print(f"📹 Получено видео")
     
     context.chat_data["pending_video"] = {
         "type": "video",
         "text": cleaned_caption,
-        "file_id": video.file_id,
-        "original_text": caption
+        "file_id": video.file_id
     }
     
     await message.reply_video(
@@ -355,28 +345,14 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
 async def edit_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     context.user_data["waiting_for_edit"] = "photo"
-    
-    await query.message.reply_text(
-        "✏️ *Отправьте новый текст для поста*\n\n"
-        "Текст будет полностью заменён. Отправьте сообщение с новым текстом.\n"
-        "Или нажмите /cancel для отмены.",
-        parse_mode="Markdown"
-    )
+    await query.message.reply_text("✏️ Отправьте новый текст для поста. Или /cancel для отмены.")
 
 async def edit_video_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     context.user_data["waiting_for_edit"] = "video"
-    
-    await query.message.reply_text(
-        "✏️ *Отправьте новый текст для видео*\n\n"
-        "Текст будет полностью заменён. Отправьте сообщение с новым текстом.\n"
-        "Или нажмите /cancel для отмены.",
-        parse_mode="Markdown"
-    )
+    await query.message.reply_text("✏️ Отправьте новый текст для видео. Или /cancel для отмены.")
 
 async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     edit_type = context.user_data.get("waiting_for_edit")
@@ -390,24 +366,14 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if pending:
             pending["text"] = new_text
             context.chat_data["pending_post"] = pending
-            
-            await update.message.reply_text(
-                f"✅ *Текст обновлён!*\n\n{new_text[:300]}...\n\nПродолжить оформление?",
-                parse_mode="Markdown",
-                reply_markup=get_post_preview_keyboard()
-            )
+            await update.message.reply_text("✅ Текст обновлён!", reply_markup=get_post_preview_keyboard())
     
     elif edit_type == "video":
         pending = context.chat_data.get("pending_video", {})
         if pending:
             pending["text"] = new_text
             context.chat_data["pending_video"] = pending
-            
-            await update.message.reply_text(
-                f"✅ *Текст обновлён!*\n\n{new_text[:300]}...\n\nПродолжить?",
-                parse_mode="Markdown",
-                reply_markup=get_video_keyboard()
-            )
+            await update.message.reply_text("✅ Текст обновлён!", reply_markup=get_video_keyboard())
     
     context.user_data["waiting_for_edit"] = None
 
@@ -423,46 +389,36 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     pending = context.chat_data.get("pending_post", {})
     
     if not pending or pending.get("type") != "photo":
-        await query.message.reply_text("❌ Оформить можно только фото с подписью.")
+        await query.message.reply_text("❌ Оформить можно только фото")
         return
     
     full_text = pending.get("text", "")
     if not full_text:
-        await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
+        await query.message.reply_text("❌ Нет текста")
         return
     
-    # Берём первую строку как заголовок для фото
-    lines = full_text.rstrip('\n').split('\n')
+    # Первая строка - заголовок для фото
+    lines = full_text.split('\n')
     title_for_photo = lines[0][:150] if lines else "Пост"
     
-    # Весь текст целиком (с заголовком) для публикации
-    full_text_for_publish = full_text
-    
     if not pending.get("photo_bytes"):
-        await query.message.reply_text("❌ Нет фото. Отправьте фото заново.")
+        await query.message.reply_text("❌ Нет фото")
         return
     
     try:
         await query.message.reply_text("🎨 Оформляю пост...")
         
-        # Обрабатываем фото (заголовок наносим на фото)
         photo_io = process_photo(pending["photo_bytes"], title_for_photo)
         
-        if photo_io.getbuffer().nbytes == 0:
-            raise ValueError("Фото пустое после обработки")
-        
         context.chat_data["designed_post"] = {
-            "text": full_text_for_publish,  # Сохраняем ВЕСЬ текст
+            "text": full_text,
             "photo_bytes": photo_io.getvalue()
         }
         
-        # Предпросмотр: показываем фото и текст (без дубляжа заголовка)
-        preview_text = f"{full_text_for_publish[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
-        
         await query.message.reply_photo(
             photo=photo_io,
-            caption=preview_text,
-            parse_mode="Markdown",
+            caption=f"{full_text[:300]}...\n\n✅ Пост оформлен!",
+            parse_mode="HTML",
             reply_markup=get_publish_button()
         )
         
@@ -470,9 +426,8 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.message.delete()
         except:
             pass
-        
     except Exception as e:
-        print(f"❌ Ошибка оформления: {e}")
+        print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
 # ==================== ПУБЛИКАЦИЯ ====================
@@ -483,31 +438,25 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
     designed = context.chat_data.get("designed_post", {})
     
     if not designed:
-        await query.message.reply_text("❌ Нет оформленного поста.")
+        await query.message.reply_text("❌ Нет оформленного поста")
         return
     
     full_text = designed.get("text", "")
     photo_bytes = designed.get("photo_bytes")
     
     if not photo_bytes:
-        await query.message.reply_text("❌ Нет фото для публикации.")
+        await query.message.reply_text("❌ Нет фото")
         return
     
     try:
-        # Обрезаем текст до 1000 символов
+        # Обрезаем до 1000 символов
         if len(full_text) > 1000:
             full_text = full_text[:1000] + "..."
         
-        # Делаем первую строку (заголовок) жирным
+        # Заголовок жирным
         lines = full_text.split('\n')
         if lines:
-            title_bold = f"<b>{lines[0]}</b>"
-            rest_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-            
-            if rest_text:
-                caption = f"{title_bold}\n\n{rest_text}"
-            else:
-                caption = title_bold
+            caption = f"<b>{lines[0]}</b>\n\n" + '\n'.join(lines[1:]) if len(lines) > 1 else f"<b>{lines[0]}</b>"
         else:
             caption = full_text
         
@@ -519,8 +468,6 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
             reply_markup=get_post_publish_keyboard()
         )
         
-        print(f"✅ Пост опубликован в канал с кнопками")
-        
         await query.message.reply_text("✅ Пост опубликован в канал!")
         
         context.chat_data.pop("pending_post", None)
@@ -530,9 +477,8 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
             await query.message.delete()
         except:
             pass
-        
     except Exception as e:
-        print(f"❌ Ошибка публикации: {e}")
+        print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
 async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -542,32 +488,23 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
     pending = context.chat_data.get("pending_video", {})
     
     if not pending or pending.get("type") != "video":
-        await query.message.reply_text("❌ Нет видео для публикации.")
+        await query.message.reply_text("❌ Нет видео")
         return
     
     text = pending.get("text", "")
     file_id = pending.get("file_id")
     
     if not file_id:
-        await query.message.reply_text("❌ Нет file_id видео.")
+        await query.message.reply_text("❌ Нет file_id")
         return
     
     try:
-        # Обрезаем текст до 1000 символов
         if len(text) > 1000:
             text = text[:1000] + "..."
         
         if text:
             lines = text.split('\n')
-            if lines:
-                title_bold = f"<b>{lines[0]}</b>"
-                rest_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-                if rest_text:
-                    caption = f"{title_bold}\n\n{rest_text}"
-                else:
-                    caption = title_bold
-            else:
-                caption = text
+            caption = f"<b>{lines[0]}</b>\n\n" + '\n'.join(lines[1:]) if len(lines) > 1 else f"<b>{lines[0]}</b>"
         else:
             caption = " "
         
@@ -579,19 +516,15 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=get_post_publish_keyboard()
         )
         
-        print(f"✅ Видео опубликовано в канал с кнопками")
-        
-        await query.message.reply_text("✅ Видео опубликовано в канал!")
-        
+        await query.message.reply_text("✅ Видео опубликовано!")
         context.chat_data.pop("pending_video", None)
         
         try:
             await query.message.delete()
         except:
             pass
-        
     except Exception as e:
-        print(f"❌ Ошибка публикации видео: {e}")
+        print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
 async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, news_id: str):
@@ -600,13 +533,11 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     try:
-        # Обрезаем текст до 1000 символов
         news_text = news['text']
         if len(news_text) > 1000:
             news_text = news_text[:1000] + "..."
         
-        title_bold = f"<b>{news['title']}</b>"
-        caption = f"{title_bold}\n\n{news_text}\n\n🔗 {news['url']}"
+        caption = f"<b>{news['title']}</b>\n\n{news_text}\n\n🔗 {news['url']}"
         
         if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
             await context.bot.send_photo(
@@ -626,24 +557,17 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
         
         save_published(news['url'], news['title'])
         pending_news.pop(news_id, None)
-        
     except Exception as e:
-        print(f"❌ Ошибка публикации новости: {e}")
-        raise e
+        print(f"❌ Ошибка: {e}")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Бот новостей Гродно*\n\n"
-        "*Доступные функции:*\n\n"
-        "📰 *Парсинг новостей* — нажми кнопку ниже\n"
-        "🖼️ *Фото* — отправьте фото с подписью (оформление)\n"
+        "📰 *Парсинг новостей* — нажми кнопку\n"
+        "🖼️ *Фото* — отправьте фото с подписью\n"
         "📹 *Видео* — отправьте видео с подписью\n\n"
-        "*Редактирование:*\n"
-        "✏️ Можно отредактировать текст перед публикацией\n\n"
-        "*После публикации:*\n"
-        "📢 Кнопки подписки и предложки новостей\n\n"
-        "👇 *Нажми кнопку*",
+        "👇 Нажми кнопку",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -657,7 +581,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         news_items = await fetch_news_from_csv(10)
         if not news_items:
-            await query.message.reply_text("❌ Не удалось загрузить новости.", reply_markup=get_main_keyboard())
+            await query.message.reply_text("❌ Не удалось загрузить новости", reply_markup=get_main_keyboard())
             return
         
         pending_news.clear()
@@ -665,8 +589,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, item in enumerate(news_items):
             if is_already_published(item['url']):
                 continue
-            
-            status_msg = await query.message.reply_text(f"📡 {item['title'][:60]}...")
             
             image_url = await fetch_article_image(item['url'])
             article_text = await fetch_article_text(item['url'])
@@ -676,7 +598,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             processed_photo = None
             if image_url:
                 try:
-                    await status_msg.edit_text(f"📸 Обрабатываю фото...")
                     async with httpx.AsyncClient(timeout=20.0) as client:
                         resp = await client.get(image_url)
                         if resp.status_code == 200:
@@ -693,8 +614,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             caption = f"📰 *{item['title']}*\n\n{article_text}\n\n🔗 [Читать]({item['url']})"
             
-            await status_msg.delete()
-            
             if processed_photo:
                 await query.message.reply_photo(
                     photo=processed_photo,
@@ -709,14 +628,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=get_news_keyboard(news_id)
                 )
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
         
         await query.message.reply_text("✅ Готово!", reply_markup=get_main_keyboard())
     
     elif data.startswith("publish:"):
         news_id = data.split(":")[1]
         await publish_news_callback(update, context, news_id)
-        await query.message.reply_text("✅ Опубликовано в канал!", reply_markup=get_post_publish_keyboard())
+        await query.message.reply_text("✅ Опубликовано!", reply_markup=get_post_publish_keyboard())
         try:
             await query.message.delete()
         except:
@@ -759,6 +678,12 @@ async def health():
 # ==================== ЗАПУСК ====================
 async def run_bot():
     init_db()
+    
+    # Принудительно удаляем webhook
+    bot = Bot(token=BOT_TOKEN)
+    await bot.delete_webhook()
+    print("✅ Webhook удалён")
+    
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel_edit))
@@ -772,7 +697,6 @@ async def run_bot():
     await application.updater.start_polling()
     
     print("✅ Бот запущен!")
-    return application
 
 if __name__ == "__main__":
     import threading
