@@ -52,7 +52,6 @@ def save_published(url: str, title: str):
 
 # ==================== ОЧИСТКА ТЕКСТА ====================
 def remove_emojis(text: str) -> str:
-    """Удаляет только смайлики"""
     if not text:
         return ""
     emoji_pattern = re.compile(
@@ -71,7 +70,7 @@ def remove_emojis(text: str) -> str:
     return emoji_pattern.sub(r'', text)
 
 def format_caption(title: str, body: str) -> str:
-    """Форматирует подпись: заголовок жирным, затем одна пустая строка (только если есть тело)"""
+    """Форматирует подпись: заголовок жирным, затем один перенос строки"""
     if body and body.strip():
         return f"<b>{title}</b>\n{body}"
     else:
@@ -279,7 +278,6 @@ def get_post_preview_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_designed_post_keyboard():
-    """Кнопки после оформления поста"""
     keyboard = [
         [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")],
         [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")]
@@ -309,7 +307,8 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     context.chat_data["pending_post"] = {
         "type": "photo",
         "text": cleaned_caption,
-        "file_id": photo.file_id
+        "file_id": photo.file_id,
+        "photo_bytes": None
     }
     
     try:
@@ -397,12 +396,11 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if designed:
             designed["text"] = new_text
             context.chat_data["designed_post"] = designed
-            # Показываем предпросмотр с обновлённым текстом
             photo_bytes = designed.get("photo_bytes")
             if photo_bytes:
                 await update.message.reply_photo(
                     photo=photo_bytes,
-                    caption=f"{new_text[:300]}...\n\n✅ Текст обновлён! Нажми кнопку для публикации.",
+                    caption=f"{new_text}\n\n✅ Текст обновлён!",
                     parse_mode="HTML",
                     reply_markup=get_designed_post_keyboard()
                 )
@@ -429,7 +427,6 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет текста")
         return
     
-    # Первая строка - заголовок для фото
     lines = full_text.split('\n')
     title_for_photo = lines[0][:150] if lines else "Пост"
     
@@ -447,9 +444,10 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "photo_bytes": photo_io.getvalue()
         }
         
+        # Отправляем оформленное фото с ПОЛНЫМ текстом
         await query.message.reply_photo(
             photo=photo_io,
-            caption=f"{full_text[:300]}...\n\n✅ Пост оформлен!",
+            caption=f"{full_text}\n\n✅ Пост оформлен!",
             parse_mode="HTML",
             reply_markup=get_designed_post_keyboard()
         )
@@ -462,7 +460,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ С ОФОРМЛЕНИЕМ ====================
+# ==================== ПУБЛИКАЦИЯ ====================
 async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -484,7 +482,6 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         if len(full_text) > 1000:
             full_text = full_text[:1000] + "..."
         
-        # Форматируем: заголовок жирным, затем одна пустая строка
         lines = full_text.split('\n')
         title = lines[0] if lines else ""
         body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
@@ -511,7 +508,6 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ БЕЗ ОФОРМЛЕНИЯ ====================
 async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -523,17 +519,16 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     full_text = pending.get("text", "")
-    photo_bytes = pending.get("photo_bytes")
+    file_id = pending.get("file_id")
     
-    if not photo_bytes:
-        await query.message.reply_text("❌ Нет фото")
+    if not file_id:
+        await query.message.reply_text("❌ Нет file_id фото")
         return
     
     try:
         if len(full_text) > 1000:
             full_text = full_text[:1000] + "..."
         
-        # Форматируем: заголовок жирным, затем одна пустая строка
         lines = full_text.split('\n')
         title = lines[0] if lines else ""
         body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
@@ -541,7 +536,7 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
-            photo=photo_bytes,
+            photo=file_id,
             caption=caption,
             parse_mode="HTML",
             reply_markup=get_post_publish_keyboard()
@@ -559,7 +554,6 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ ВИДЕО ====================
 async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -608,7 +602,6 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
-# ==================== ПУБЛИКАЦИЯ НОВОСТЕЙ ====================
 async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, news_id: str):
     news = pending_news.get(news_id)
     if not news:
@@ -695,18 +688,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             
             caption = format_caption(item['title'], article_text + f"\n\n🔗 [Читать]({item['url']})")
+            caption = caption.replace("<b>", "").replace("</b>", "")  # Убираем HTML для Markdown
+            caption = f"📰 *{item['title']}*\n\n{article_text}\n\n🔗 [Читать]({item['url']})"
             
             if processed_photo:
                 await query.message.reply_photo(
                     photo=processed_photo,
                     caption=caption,
-                    parse_mode="HTML",
+                    parse_mode="Markdown",
                     reply_markup=get_news_keyboard(news_id)
                 )
             else:
                 await query.message.reply_text(
                     caption,
-                    parse_mode="HTML",
+                    parse_mode="Markdown",
                     reply_markup=get_news_keyboard(news_id)
                 )
             
