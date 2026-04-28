@@ -50,13 +50,13 @@ def save_published(url: str, title: str):
             (url, title, datetime.now())
         )
 
-# ==================== ОЧИСТКА ТЕКСТА ====================
-def clean_text(text: str) -> str:
-    """Удаляет смайлики и активные ссылки из текста"""
+# ==================== ОЧИСТКА ТЕКСТА (ТОЛЬКО СМАЙЛИКИ) ====================
+def remove_emojis(text: str) -> str:
+    """Удаляет только смайлики, сохраняя все пробелы и абзацы"""
     if not text:
         return ""
     
-    # Удаляем emoji (смайлики)
+    # Регулярное выражение для удаления emoji
     emoji_pattern = re.compile(
         "["
         "\U0001F600-\U0001F64F"  # смайлики
@@ -72,19 +72,7 @@ def clean_text(text: str) -> str:
     )
     text = emoji_pattern.sub(r'', text)
     
-    # Удаляем активные ссылки (URL)
-    url_pattern = re.compile(r'https?://\S+', re.IGNORECASE)
-    text = url_pattern.sub(r'', text)
-    
-    # Удаляем ссылки вида t.me/...
-    tg_link_pattern = re.compile(r't\.me/\S+', re.IGNORECASE)
-    text = tg_link_pattern.sub(r'', text)
-    
-    # Убираем лишние пробелы и пустые строки
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    text = '\n'.join(lines)
-    
-    return text.strip()
+    return text
 
 # ==================== ПАРСЕРЫ ====================
 async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
@@ -306,8 +294,8 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     caption = message.caption or ""
     photo = message.photo[-1]
     
-    # Очищаем текст от смайликов и ссылок
-    cleaned_caption = clean_text(caption)
+    # Удаляем только смайлики, сохраняем все пробелы и абзацы
+    cleaned_caption = remove_emojis(caption)
     
     print(f"📸 Получено фото. ID: {photo.file_id}")
     
@@ -324,7 +312,7 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         context.chat_data["pending_post"]["photo_bytes"] = photo_bytes
         print(f"✅ Фото скачано: {len(photo_bytes)} байт")
         
-        # Отправляем сам пост без лишнего текста
+        # Отправляем очищенный текст (без смайликов, с сохранением форматирования)
         await message.reply_photo(
             photo=photo.file_id,
             caption=cleaned_caption if cleaned_caption else " ",
@@ -342,8 +330,8 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
     
     caption = message.caption or ""
     
-    # Очищаем текст от смайликов и ссылок
-    cleaned_caption = clean_text(caption)
+    # Удаляем только смайлики, сохраняем все пробелы и абзацы
+    cleaned_caption = remove_emojis(caption)
     
     video = message.video
     
@@ -443,8 +431,11 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет текста. Отправьте фото с подписью.")
         return
     
+    # Берём первую строку как заголовок для фото
     lines = full_text.rstrip('\n').split('\n')
-    title = lines[0][:150] if lines else "Пост"
+    title_for_photo = lines[0][:150] if lines else "Пост"
+    
+    # Весь текст целиком (с заголовком) для публикации
     full_text_for_publish = full_text
     
     if not pending.get("photo_bytes"):
@@ -454,18 +445,19 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text("🎨 Оформляю пост...")
         
-        photo_io = process_photo(pending["photo_bytes"], title)
+        # Обрабатываем фото (заголовок наносим на фото)
+        photo_io = process_photo(pending["photo_bytes"], title_for_photo)
         
         if photo_io.getbuffer().nbytes == 0:
             raise ValueError("Фото пустое после обработки")
         
         context.chat_data["designed_post"] = {
-            "title": title,
-            "text": full_text_for_publish,
+            "text": full_text_for_publish,  # Сохраняем ВЕСЬ текст
             "photo_bytes": photo_io.getvalue()
         }
         
-        preview_text = f"📰 *{title}*\n\n{full_text_for_publish[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
+        # Предпросмотр: показываем фото и текст (без дубляжа заголовка)
+        preview_text = f"{full_text_for_publish[:300]}...\n\n✅ Пост оформлен! Нажми кнопку для публикации."
         
         await query.message.reply_photo(
             photo=photo_io,
@@ -506,6 +498,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         if len(full_text) > 1000:
             full_text = full_text[:1000] + "..."
         
+        # Делаем первую строку (заголовок) жирным
         lines = full_text.split('\n')
         if lines:
             title_bold = f"<b>{lines[0]}</b>"
