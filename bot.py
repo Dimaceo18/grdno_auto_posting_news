@@ -50,6 +50,42 @@ def save_published(url: str, title: str):
             (url, title, datetime.now())
         )
 
+# ==================== ОЧИСТКА ТЕКСТА ====================
+def clean_text(text: str) -> str:
+    """Удаляет смайлики и активные ссылки из текста"""
+    if not text:
+        return ""
+    
+    # Удаляем emoji (смайлики)
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # смайлики
+        "\U0001F300-\U0001F5FF"  # символы
+        "\U0001F680-\U0001F6FF"  # транспорт
+        "\U0001F1E0-\U0001F1FF"  # флаги
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "\U0001F900-\U0001F9FF"  # дополнительные смайлики
+        "\U0001FA70-\U0001FAFF"  # новые эмодзи
+        "]+",
+        flags=re.UNICODE
+    )
+    text = emoji_pattern.sub(r'', text)
+    
+    # Удаляем активные ссылки (URL)
+    url_pattern = re.compile(r'https?://\S+', re.IGNORECASE)
+    text = url_pattern.sub(r'', text)
+    
+    # Удаляем ссылки вида t.me/...
+    tg_link_pattern = re.compile(r't\.me/\S+', re.IGNORECASE)
+    text = tg_link_pattern.sub(r'', text)
+    
+    # Убираем лишние пробелы и пустые строки
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    text = '\n'.join(lines)
+    
+    return text.strip()
+
 # ==================== ПАРСЕРЫ ====================
 async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
     news_list = []
@@ -270,11 +306,14 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
     caption = message.caption or ""
     photo = message.photo[-1]
     
+    # Очищаем текст от смайликов и ссылок
+    cleaned_caption = clean_text(caption)
+    
     print(f"📸 Получено фото. ID: {photo.file_id}")
     
     context.chat_data["pending_post"] = {
         "type": "photo",
-        "text": caption,
+        "text": cleaned_caption,
         "file_id": photo.file_id,
         "original_text": caption
     }
@@ -285,10 +324,11 @@ async def handle_forwarded_photo(update: Update, context: ContextTypes.DEFAULT_T
         context.chat_data["pending_post"]["photo_bytes"] = photo_bytes
         print(f"✅ Фото скачано: {len(photo_bytes)} байт")
         
+        # Отправляем сам пост без лишнего текста
         await message.reply_photo(
             photo=photo.file_id,
-            caption=f"📝 *Получен пост!*\n\n{caption[:300] if caption else 'без текста'}...\n\nВыбери действие:",
-            parse_mode="Markdown",
+            caption=cleaned_caption if cleaned_caption else " ",
+            parse_mode="HTML",
             reply_markup=get_post_preview_keyboard()
         )
     except Exception as e:
@@ -301,21 +341,25 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     caption = message.caption or ""
+    
+    # Очищаем текст от смайликов и ссылок
+    cleaned_caption = clean_text(caption)
+    
     video = message.video
     
     print(f"📹 Получено видео. ID: {video.file_id}")
     
     context.chat_data["pending_video"] = {
         "type": "video",
-        "text": caption,
+        "text": cleaned_caption,
         "file_id": video.file_id,
         "original_text": caption
     }
     
     await message.reply_video(
         video=video.file_id,
-        caption=f"📝 *Получен пост с видео!*\n\n{caption[:300] if caption else 'без текста'}...\n\nВыбери действие:",
-        parse_mode="Markdown",
+        caption=cleaned_caption if cleaned_caption else " ",
+        parse_mode="HTML",
         reply_markup=get_video_keyboard()
     )
 
