@@ -63,6 +63,15 @@ def init_db():
                 created_at TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT,
+                file_id TEXT,
+                schedule_time TIMESTAMP,
+                created_at TIMESTAMP
+            )
+        """)
     print("✅ База данных готова")
 
 def save_scheduled_post(text: str, photo_bytes: bytes, schedule_time: datetime):
@@ -70,6 +79,13 @@ def save_scheduled_post(text: str, photo_bytes: bytes, schedule_time: datetime):
         conn.execute(
             "INSERT INTO scheduled_posts (text, photo_bytes, schedule_time, created_at) VALUES (?, ?, ?, ?)",
             (text, photo_bytes, schedule_time, datetime.now())
+        )
+
+def save_scheduled_video(text: str, file_id: str, schedule_time: datetime):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_videos (text, file_id, schedule_time, created_at) VALUES (?, ?, ?, ?)",
+            (text, file_id, schedule_time, datetime.now())
         )
 
 def get_pending_scheduled_posts() -> List[Dict]:
@@ -81,9 +97,22 @@ def get_pending_scheduled_posts() -> List[Dict]:
         ).fetchall()
         return [dict(row) for row in result]
 
+def get_pending_scheduled_videos() -> List[Dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        result = conn.execute(
+            "SELECT id, text, file_id, schedule_time FROM scheduled_videos WHERE schedule_time <= ?",
+            (datetime.now(),)
+        ).fetchall()
+        return [dict(row) for row in result]
+
 def delete_scheduled_post(post_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (post_id,))
+
+def delete_scheduled_video(video_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM scheduled_videos WHERE id = ?", (video_id,))
 
 def is_already_published(url: str) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
@@ -331,7 +360,9 @@ def get_news_keyboard(news_id: str):
 def get_video_keyboard():
     keyboard = [
         [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_video_text")],
-        [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")]
+        [InlineKeyboardButton("🤖 Обработать текст (ИИ)", callback_data="ai_process_video")],
+        [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_video_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -342,6 +373,25 @@ def get_post_preview_keyboard():
         [InlineKeyboardButton("🤖 Обработать текст (ИИ)", callback_data="ai_process")],
         [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")],
         [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_ai_result_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_raw")],
+        [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
+        [InlineKeyboardButton("🔄 Переделать текст (другой запрос)", callback_data="ai_reprocess")],
+        [InlineKeyboardButton("✏️ Редактировать вручную", callback_data="edit_text")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_preview")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_video_ai_result_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")],
+        [InlineKeyboardButton("✏️ Редактировать вручную", callback_data="edit_video_text")],
+        [InlineKeyboardButton("🔄 Переделать текст (другой запрос)", callback_data="ai_reprocess_video")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -363,6 +413,26 @@ def get_schedule_keyboard():
     if row:
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_preview")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_video_schedule_keyboard():
+    schedule_times = [
+        ("Через 30 мин", "30min"),
+        ("9:05", "9:05"), ("10:05", "10:05"), ("10:06", "10:06"), ("11:07", "11:07"),
+        ("12:08", "12:08"), ("13:09", "13:09"), ("14:10", "14:10"), ("15:11", "15:11"),
+        ("16:12", "16:12"), ("17:13", "17:13"), ("18:14", "18:14"), ("19:07", "19:07"),
+        ("20:08", "20:08"), ("21:09", "21:09"), ("22:11", "22:11"), ("22:45", "22:45")
+    ]
+    keyboard = []
+    row = []
+    for i, (label, value) in enumerate(schedule_times):
+        row.append(InlineKeyboardButton(label, callback_data=f"schedule_video:{value}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_designed_post_keyboard():
@@ -440,71 +510,6 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=get_video_keyboard()
     )
 
-# ==================== ОБРАБОТКА ИИ ====================
-async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not deepseek_client:
-        await query.message.reply_text("❌ API DeepSeek не настроен. Добавьте DEEPSEEK_API_KEY в переменные окружения.")
-        return
-    
-    pending = context.chat_data.get("pending_post", {})
-    text = pending.get("text", "")
-    
-    if not text:
-        await query.message.reply_text("❌ Нет текста для обработки")
-        return
-    
-    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek... Это может занять несколько секунд.")
-    
-    try:
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": DEEPSEEK_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        processed_text = response.choices[0].message.content
-        
-        # Парсим ответ DeepSeek
-        title = ""
-        body = ""
-        for line in processed_text.split('\n'):
-            if line.startswith("Заголовок:"):
-                title = line.replace("Заголовок:", "").strip()
-            elif line.startswith("Текст:"):
-                body = line.replace("Текст:", "").strip()
-        
-        if not title and not body:
-            body = processed_text
-        
-        # Обновляем текст в pending_post
-        if title and body:
-            new_text = f"{title}\n\n{body}"
-        else:
-            new_text = body if body else processed_text
-        
-        pending["text"] = new_text
-        context.chat_data["pending_post"] = pending
-        
-        await query.message.reply_text(
-            f"✅ Текст обработан!\n\n"
-            f"📰 *Новый заголовок:* {title}\n\n"
-            f"📝 *Новый текст:*\n{body[:500]}...\n\n"
-            f"Продолжить оформление?",
-            parse_mode="Markdown",
-            reply_markup=get_post_preview_keyboard()
-        )
-        
-    except Exception as e:
-        print(f"❌ Ошибка DeepSeek: {e}")
-        await query.message.reply_text(f"❌ Ошибка при обработке текста: {e}")
-
 # ==================== РЕДАКТИРОВАНИЕ ====================
 async def edit_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -564,6 +569,219 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_for_edit"] = None
     await update.message.reply_text("✅ Редактирование отменено.")
+
+# ==================== ОБРАБОТКА ИИ ДЛЯ ФОТО ====================
+async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not deepseek_client:
+        await query.message.reply_text("❌ API DeepSeek не настроен.")
+        return
+    
+    custom_request = context.user_data.get("custom_ai_request", "")
+    if custom_request:
+        prompt = f"""{DEEPSEEK_PROMPT}
+        
+        Дополнительные требования пользователя: {custom_request}
+        
+        Переделай новость согласно этим требованиям."""
+        context.user_data["custom_ai_request"] = None
+    else:
+        prompt = DEEPSEEK_PROMPT
+    
+    pending = context.chat_data.get("pending_post", {})
+    text = pending.get("text", "")
+    
+    if not text:
+        await query.message.reply_text("❌ Нет текста для обработки")
+        return
+    
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
+    
+    try:
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        processed_text = response.choices[0].message.content
+        
+        title = ""
+        body = ""
+        for line in processed_text.split('\n'):
+            if line.startswith("Заголовок:"):
+                title = line.replace("Заголовок:", "").strip()
+            elif line.startswith("Текст:"):
+                body = line.replace("Текст:", "").strip()
+        
+        if not title and not body:
+            body = processed_text
+        
+        if title and body:
+            new_text = f"{title}\n\n{body}"
+        else:
+            new_text = body if body else processed_text
+        
+        pending["text"] = new_text
+        context.chat_data["pending_post"] = pending
+        
+        await query.message.reply_text(
+            f"✅ *Текст обработан!*\n\n"
+            f"📰 *Заголовок:* {title}\n\n"
+            f"📝 *Текст:*\n{body[:500]}...\n\n"
+            f"Выберите действие:",
+            parse_mode="Markdown",
+            reply_markup=get_ai_result_keyboard()
+        )
+        
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
+
+async def ai_reprocess_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.reply_text(
+        "📝 *Введите ваш запрос для переделки текста*\n\n"
+        "Примеры:\n"
+        "• Сделай заголовок броским\n"
+        "• Сократи до 400 символов\n"
+        "• Сделай более официальным\n\n"
+        "Или /cancel для отмены.",
+        parse_mode="Markdown"
+    )
+    
+    context.user_data["waiting_for_ai_request"] = True
+
+# ==================== ОБРАБОТКА ИИ ДЛЯ ВИДЕО ====================
+async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not deepseek_client:
+        await query.message.reply_text("❌ API DeepSeek не настроен.")
+        return
+    
+    custom_request = context.user_data.get("custom_ai_request_video", "")
+    if custom_request:
+        prompt = f"""{DEEPSEEK_PROMPT}
+        
+        Дополнительные требования пользователя: {custom_request}
+        
+        Переделай новость согласно этим требованиям."""
+        context.user_data["custom_ai_request_video"] = None
+    else:
+        prompt = DEEPSEEK_PROMPT
+    
+    pending = context.chat_data.get("pending_video", {})
+    text = pending.get("text", "")
+    
+    if not text:
+        await query.message.reply_text("❌ Нет текста для обработки")
+        return
+    
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
+    
+    try:
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        processed_text = response.choices[0].message.content
+        
+        title = ""
+        body = ""
+        for line in processed_text.split('\n'):
+            if line.startswith("Заголовок:"):
+                title = line.replace("Заголовок:", "").strip()
+            elif line.startswith("Текст:"):
+                body = line.replace("Текст:", "").strip()
+        
+        if not title and not body:
+            body = processed_text
+        
+        if title and body:
+            new_text = f"{title}\n\n{body}"
+        else:
+            new_text = body if body else processed_text
+        
+        pending["text"] = new_text
+        context.chat_data["pending_video"] = pending
+        
+        await query.message.reply_text(
+            f"✅ *Текст обработан!*\n\n"
+            f"📰 *Заголовок:* {title}\n\n"
+            f"📝 *Текст:*\n{body[:500]}...\n\n"
+            f"Выберите действие:",
+            parse_mode="Markdown",
+            reply_markup=get_video_ai_result_keyboard()
+        )
+        
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
+
+async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.reply_text(
+        "📝 *Введите ваш запрос для переделки текста видео*\n\n"
+        "Примеры:\n"
+        "• Сделай заголовок броским\n"
+        "• Сократи до 400 символов\n"
+        "• Сделай более официальным\n\n"
+        "Или /cancel для отмены.",
+        parse_mode="Markdown"
+    )
+    
+    context.user_data["waiting_for_ai_request_video"] = True
+
+# ==================== ОБРАБОТЧИКИ ЗАПРОСОВ ИИ ====================
+async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Для фото
+    if context.user_data.get("waiting_for_ai_request"):
+        request = update.message.text
+        context.user_data["custom_ai_request"] = request
+        context.user_data["waiting_for_ai_request"] = False
+        await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
+        # Создаём фейковый callback
+        class FakeQuery:
+            def __init__(self, message):
+                self.message = message
+            async def answer(self):
+                pass
+        fake_query = FakeQuery(update.message)
+        await ai_process_callback(update, context)
+        return
+    
+    # Для видео
+    if context.user_data.get("waiting_for_ai_request_video"):
+        request = update.message.text
+        context.user_data["custom_ai_request_video"] = request
+        context.user_data["waiting_for_ai_request_video"] = False
+        await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
+        class FakeQuery:
+            def __init__(self, message):
+                self.message = message
+            async def answer(self):
+                pass
+        fake_query = FakeQuery(update.message)
+        await ai_process_video_callback(update, context)
+        return
 
 # ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -632,6 +850,19 @@ async def back_to_preview_callback(update: Update, context: ContextTypes.DEFAULT
         reply_markup=get_post_preview_keyboard()
     )
 
+async def back_to_video_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.chat_data.get("pending_video", {})
+    text = pending.get("text", "")
+    
+    await query.message.edit_caption(
+        caption=text if text else " ",
+        parse_mode="HTML",
+        reply_markup=get_video_keyboard()
+    )
+
 async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -665,6 +896,50 @@ async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_T
     )
     
     context.chat_data.pop("pending_post", None)
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+async def schedule_video_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_reply_markup(reply_markup=get_video_schedule_keyboard())
+
+async def schedule_video_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    time_value = query.data.split(":")[1]
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = f"{publish_time.strftime('%H:%M')} ({publish_time.strftime('%d.%m')})"
+    
+    pending = context.chat_data.get("pending_video", {})
+    text = pending.get("text", "")
+    file_id = pending.get("file_id")
+    
+    if not file_id:
+        await query.message.reply_text("❌ Нет данных для отложенной публикации")
+        return
+    
+    save_scheduled_video(text, file_id, publish_time)
+    
+    await query.message.reply_text(
+        f"✅ Видео запланировано на {time_str}\n\n"
+        f"Оно будет автоматически опубликовано в канал в указанное время."
+    )
+    
+    context.chat_data.pop("pending_video", None)
     
     try:
         await query.message.delete()
@@ -900,6 +1175,7 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def check_scheduled_posts(app: Application):
     while True:
         try:
+            # Проверяем отложенные фото-посты
             posts = get_pending_scheduled_posts()
             for post in posts:
                 photo_bytes = post["photo_bytes"]
@@ -922,7 +1198,36 @@ async def check_scheduled_posts(app: Application):
                 )
                 
                 delete_scheduled_post(post["id"])
-                print(f"✅ Опубликован отложенный пост")
+                print(f"✅ Опубликован отложенный фото-пост")
+            
+            # Проверяем отложенные видео
+            videos = get_pending_scheduled_videos()
+            for video in videos:
+                text = video["text"]
+                file_id = video["file_id"]
+                
+                if len(text) > 1000:
+                    text = text[:1000] + "..."
+                
+                if text:
+                    lines = text.split('\n')
+                    title = lines[0] if lines else ""
+                    body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                    caption = format_caption(title, body)
+                else:
+                    caption = " "
+                
+                await app.bot.send_video(
+                    chat_id=CHANNEL_ID,
+                    video=file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=get_post_publish_keyboard()
+                )
+                
+                delete_scheduled_video(video["id"])
+                print(f"✅ Опубликовано отложенное видео")
+                
         except Exception as e:
             print(f"❌ Ошибка в планировщике: {e}")
         
@@ -1047,17 +1352,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "schedule_menu":
         await schedule_menu_callback(update, context)
     
+    elif data == "schedule_video_menu":
+        await schedule_video_menu_callback(update, context)
+    
     elif data == "back_to_preview":
         await back_to_preview_callback(update, context)
     
+    elif data == "back_to_video_preview":
+        await back_to_video_preview_callback(update, context)
+    
     elif data == "ai_process":
         await ai_process_callback(update, context)
+    
+    elif data == "ai_process_video":
+        await ai_process_video_callback(update, context)
+    
+    elif data == "ai_reprocess":
+        await ai_reprocess_callback(update, context)
+    
+    elif data == "ai_reprocess_video":
+        await ai_reprocess_video_callback(update, context)
     
     elif data.startswith("schedule:"):
         if context.user_data.get("scheduling_designed"):
             await schedule_designed_time_callback(update, context)
         else:
             await schedule_post_callback(update, context)
+    
+    elif data.startswith("schedule_video:"):
+        await schedule_video_post_callback(update, context)
     
     elif data == "schedule_designed":
         await schedule_designed_callback(update, context)
@@ -1093,6 +1416,7 @@ async def run_bot():
     application.add_handler(MessageHandler(filters.PHOTO, handle_forwarded_photo))
     application.add_handler(MessageHandler(filters.VIDEO, handle_forwarded_video))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edited_text))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_request))
     
     await application.initialize()
     await application.start()
