@@ -14,16 +14,34 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import httpx
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from openai import AsyncOpenAI
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/grodno_news")
 SUGGEST_LINK = os.getenv("SUGGEST_LINK", "https://t.me/grodno_news_bot?start=suggest")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
 
+# Инициализация DeepSeek клиента
+deepseek_client = AsyncOpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
+) if DEEPSEEK_API_KEY else None
+
 pending_news: Dict[str, Dict] = {}
+
+# Промпт для DeepSeek
+DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
+
+Тебе нужно переделывать новость с большого объема в новость на 650 символов.
+Убирая всю лишнюю воду, текст, делать интересным заголовок, никаких смайликов. Сохраняй главные факты, проверяй всю информацию несколько раз, чтобы не было никаких ошибок.
+
+Верни только готовую новость в формате:
+Заголовок: (заголовок новости)
+Текст: (текст новости на 650 символов)"""
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -169,7 +187,7 @@ async def fetch_article_text(url: str) -> str:
         print(f"❌ Ошибка получения текста: {e}")
         return "Не удалось загрузить текст статьи."
 
-# ==================== ОБРАБОТКА ФОТО (С ПОДДЕРЖКОЙ MONTSERRAT-BOLD) ====================
+# ==================== ОБРАБОТКА ФОТО ====================
 def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[str]:
     words = text.split()
     lines = []
@@ -229,17 +247,14 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         img = Image.alpha_composite(base, overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
     
-    # ============ ПОИСК ШРИФТА MONTSERRAT-BLACK ============
     font = None
     font_size = 68
     
     font_paths = [
-        "Montserrat-Black.ttf",          # корень проекта
-        "fonts/Montserrat-Black.ttf",    # папка fonts
-        "/app/Montserrat-Black.ttf",     # Docker контейнер
-        "/app/fonts/Montserrat-Black.ttf",
-        "Montserrat-Bold.ttf",           # запасной вариант
-        "DejaVuSans-Bold.ttf",           # системный запасной
+        "Montserrat-Black.ttf",
+        "fonts/Montserrat-Black.ttf",
+        "/app/Montserrat-Black.ttf",
+        "Montserrat-Bold.ttf",
     ]
     
     for font_path in font_paths:
@@ -248,8 +263,7 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
                 font = ImageFont.truetype(font_path, font_size)
                 print(f"✅ Загружен шрифт: {font_path}")
                 break
-        except Exception as e:
-            print(f"⚠️ Не удалось загрузить {font_path}: {e}")
+        except:
             continue
     
     if font is None:
@@ -325,6 +339,7 @@ def get_post_preview_keyboard():
     keyboard = [
         [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
         [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_text")],
+        [InlineKeyboardButton("🤖 Обработать текст (ИИ)", callback_data="ai_process")],
         [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")],
         [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_menu")]
     ]
@@ -424,6 +439,71 @@ async def handle_forwarded_video(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode="HTML",
         reply_markup=get_video_keyboard()
     )
+
+# ==================== ОБРАБОТКА ИИ ====================
+async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not deepseek_client:
+        await query.message.reply_text("❌ API DeepSeek не настроен. Добавьте DEEPSEEK_API_KEY в переменные окружения.")
+        return
+    
+    pending = context.chat_data.get("pending_post", {})
+    text = pending.get("text", "")
+    
+    if not text:
+        await query.message.reply_text("❌ Нет текста для обработки")
+        return
+    
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek... Это может занять несколько секунд.")
+    
+    try:
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": DEEPSEEK_PROMPT},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        processed_text = response.choices[0].message.content
+        
+        # Парсим ответ DeepSeek
+        title = ""
+        body = ""
+        for line in processed_text.split('\n'):
+            if line.startswith("Заголовок:"):
+                title = line.replace("Заголовок:", "").strip()
+            elif line.startswith("Текст:"):
+                body = line.replace("Текст:", "").strip()
+        
+        if not title and not body:
+            body = processed_text
+        
+        # Обновляем текст в pending_post
+        if title and body:
+            new_text = f"{title}\n\n{body}"
+        else:
+            new_text = body if body else processed_text
+        
+        pending["text"] = new_text
+        context.chat_data["pending_post"] = pending
+        
+        await query.message.reply_text(
+            f"✅ Текст обработан!\n\n"
+            f"📰 *Новый заголовок:* {title}\n\n"
+            f"📝 *Новый текст:*\n{body[:500]}...\n\n"
+            f"Продолжить оформление?",
+            parse_mode="Markdown",
+            reply_markup=get_post_preview_keyboard()
+        )
+        
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+        await query.message.reply_text(f"❌ Ошибка при обработке текста: {e}")
 
 # ==================== РЕДАКТИРОВАНИЕ ====================
 async def edit_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -855,8 +935,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📰 *Парсинг новостей* — нажми кнопку\n"
         "🖼️ *Фото* — отправьте фото с подписью\n"
         "📹 *Видео* — отправьте видео с подписью\n\n"
-        "*Отложенная публикация:*\n"
-        "⏰ Можно отложить пост на нужное время\n\n"
+        "*Доступные действия:*\n"
+        "• 🎨 Оформить пост\n"
+        "• ✏️ Редактировать текст\n"
+        "• 🤖 Обработать текст (ИИ)\n"
+        "• 📤 Опубликовать без оформления\n"
+        "• ⏰ Отложить публикацию\n\n"
         "👇 Нажми кнопку",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -966,6 +1050,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_to_preview":
         await back_to_preview_callback(update, context)
     
+    elif data == "ai_process":
+        await ai_process_callback(update, context)
+    
     elif data.startswith("schedule:"):
         if context.user_data.get("scheduling_designed"):
             await schedule_designed_time_callback(update, context)
@@ -980,7 +1067,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot with scheduler"}
+    return {"status": "ok", "bot": "Grodno News Bot with AI"}
 
 @app.get("/health")
 async def health():
@@ -993,6 +1080,11 @@ async def run_bot():
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook()
     print("✅ Webhook удалён")
+    
+    if deepseek_client:
+        print("✅ DeepSeek API подключен")
+    else:
+        print("⚠️ DeepSeek API не настроен")
     
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -1009,7 +1101,7 @@ async def run_bot():
     
     await application.updater.start_polling()
     
-    print("✅ Бот запущен с поддержкой отложенных постов!")
+    print("✅ Бот запущен с поддержкой отложенных постов и ИИ!")
 
 if __name__ == "__main__":
     import threading
