@@ -70,6 +70,99 @@ DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у �
 Заголовок: (заголовок новости)
 Текст: (текст новости на 650 символов)"""
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+def remove_emojis(text: str) -> str:
+    if not text:
+        return ""
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF"
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA70-\U0001FAFF"
+        "]+",
+        flags=re.UNICODE
+    )
+    return emoji_pattern.sub(r'', text)
+
+def format_caption(title: str, body: str) -> str:
+    """Форматирует caption, гарантируя что он не пустой"""
+    title = remove_emojis(title) if title else ""
+    body = remove_emojis(body) if body else ""
+    
+    if not title and not body:
+        return "."
+    
+    if title and not body:
+        return f"<b>{title}</b>"
+    
+    if not title and body:
+        return body
+    
+    return f"<b>{title}</b>\n{body}"
+
+async def safe_send_photo(bot, chat_id, photo, caption="", parse_mode="HTML", reply_markup=None):
+    """Безопасная отправка фото с проверкой caption"""
+    caption = remove_emojis(caption) if caption else ""
+    
+    if len(caption) > 1024:
+        caption = caption[:1021] + "..."
+    
+    if not caption or caption.strip() == "":
+        return await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            parse_mode=None,
+            reply_markup=reply_markup
+        )
+    
+    return await bot.send_photo(
+        chat_id=chat_id,
+        photo=photo,
+        caption=caption,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup
+    )
+
+async def safe_send_message(bot, chat_id, text, parse_mode="HTML", reply_markup=None):
+    """Безопасная отправка сообщения"""
+    text = remove_emojis(text) if text else ""
+    
+    if len(text) > 4096:
+        text = text[:4093] + "..."
+    
+    if not text or text.strip() == "":
+        text = "."
+    
+    return await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup
+    )
+
+async def safe_edit_caption(message, caption, reply_markup=None):
+    """Безопасное редактирование caption"""
+    caption = remove_emojis(caption) if caption else ""
+    if not caption or caption.strip() == "":
+        caption = "."
+    try:
+        await message.edit_caption(
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+    except Exception:
+        await message.edit_caption(
+            caption=caption,
+            parse_mode=None,
+            reply_markup=reply_markup
+        )
+
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -187,31 +280,6 @@ def save_published(url: str, title: str):
             "INSERT OR IGNORE INTO published_news (url, title, published_at) VALUES (?, ?, ?)",
             (url, title, datetime.now())
         )
-
-# ==================== ОЧИСТКА ТЕКСТА ====================
-def remove_emojis(text: str) -> str:
-    if not text:
-        return ""
-    emoji_pattern = re.compile(
-        "["
-        "\U0001F600-\U0001F64F"
-        "\U0001F300-\U0001F5FF"
-        "\U0001F680-\U0001F6FF"
-        "\U0001F1E0-\U0001F1FF"
-        "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251"
-        "\U0001F900-\U0001F9FF"
-        "\U0001FA70-\U0001FAFF"
-        "]+",
-        flags=re.UNICODE
-    )
-    return emoji_pattern.sub(r'', text)
-
-def format_caption(title: str, body: str) -> str:
-    if body and body.strip():
-        return f"<b>{title}</b>\n{body}"
-    else:
-        return f"<b>{title}</b>"
 
 # ==================== ПАРСЕРЫ ====================
 async def fetch_news_from_csv(limit: int = 10) -> List[Dict]:
@@ -671,7 +739,7 @@ async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_for_edit"] = None
     await update.message.reply_text("✅ Редактирование отменено.")
 
-# ==================== ОБРАБОТКА ИИ ДЛЯ ФОТО ====================
+# ==================== ОБРАБОТКА ИИ ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -761,7 +829,6 @@ async def ai_reprocess_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     context.user_data["waiting_for_ai_request"] = True
 
-# ==================== ОБРАБОТКА ИИ ДЛЯ ВИДЕО ====================
 async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -851,7 +918,6 @@ async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFA
     
     context.user_data["waiting_for_ai_request_video"] = True
 
-# ==================== ОБРАБОТЧИКИ ЗАПРОСОВ ИИ ====================
 async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("waiting_for_ai_request"):
         request = update.message.text
@@ -863,7 +929,6 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 self.message = message
             async def answer(self):
                 pass
-        fake_query = FakeQuery(update.message)
         await ai_process_callback(update, context)
         return
     
@@ -872,12 +937,6 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["custom_ai_request_video"] = request
         context.user_data["waiting_for_ai_request_video"] = False
         await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
-        class FakeQuery:
-            def __init__(self, message):
-                self.message = message
-            async def answer(self):
-                pass
-        fake_query = FakeQuery(update.message)
         await ai_process_video_callback(update, context)
         return
 
@@ -1058,36 +1117,40 @@ async def publish_multi_now_callback(update: Update, context: ContextTypes.DEFAU
             if post_data.get("type") == "designed" or post_data.get("photo_bytes"):
                 photo_bytes = post_data.get("photo_bytes")
                 if photo_bytes:
-                    await context.bot.send_photo(
-                        chat_id=channel_info["channel_id"],
-                        photo=photo_bytes,
-                        caption=caption,
-                        parse_mode="HTML",
-                        reply_markup=get_post_publish_keyboard()
+                    await safe_send_photo(
+                        context.bot,
+                        channel_info["channel_id"],
+                        photo_bytes,
+                        caption,
+                        "HTML",
+                        get_post_publish_keyboard()
                     )
                 else:
-                    await context.bot.send_message(
-                        chat_id=channel_info["channel_id"],
-                        text=caption,
-                        parse_mode="HTML",
-                        reply_markup=get_post_publish_keyboard()
+                    await safe_send_message(
+                        context.bot,
+                        channel_info["channel_id"],
+                        caption,
+                        "HTML",
+                        get_post_publish_keyboard()
                     )
             else:
                 file_id = post_data.get("file_id")
                 if file_id:
-                    await context.bot.send_photo(
-                        chat_id=channel_info["channel_id"],
-                        photo=file_id,
-                        caption=caption,
-                        parse_mode="HTML",
-                        reply_markup=get_post_publish_keyboard()
+                    await safe_send_photo(
+                        context.bot,
+                        channel_info["channel_id"],
+                        file_id,
+                        caption,
+                        "HTML",
+                        get_post_publish_keyboard()
                     )
                 else:
-                    await context.bot.send_message(
-                        chat_id=channel_info["channel_id"],
-                        text=caption,
-                        parse_mode="HTML",
-                        reply_markup=get_post_publish_keyboard()
+                    await safe_send_message(
+                        context.bot,
+                        channel_info["channel_id"],
+                        caption,
+                        "HTML",
+                        get_post_publish_keyboard()
                     )
             
             success_count += 1
@@ -1227,10 +1290,10 @@ async def back_to_post_preview_callback(update: Update, context: ContextTypes.DE
     pending = context.chat_data.get("pending_post", {})
     text = pending.get("text", "")
     
-    await query.message.edit_caption(
-        caption=text if text else " ",
-        parse_mode="HTML",
-        reply_markup=get_post_preview_keyboard()
+    await safe_edit_caption(
+        query.message,
+        text if text else " ",
+        get_post_preview_keyboard()
     )
 
 # ==================== ОТЛОЖЕННАЯ ПУБЛИКАЦИЯ ====================
@@ -1246,10 +1309,10 @@ async def back_to_preview_callback(update: Update, context: ContextTypes.DEFAULT
     pending = context.chat_data.get("pending_post", {})
     text = pending.get("text", "")
     
-    await query.message.edit_caption(
-        caption=text if text else " ",
-        parse_mode="HTML",
-        reply_markup=get_post_preview_keyboard()
+    await safe_edit_caption(
+        query.message,
+        text if text else " ",
+        get_post_preview_keyboard()
     )
 
 async def back_to_video_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1259,11 +1322,18 @@ async def back_to_video_preview_callback(update: Update, context: ContextTypes.D
     pending = context.chat_data.get("pending_video", {})
     text = pending.get("text", "")
     
-    await query.message.edit_caption(
-        caption=text if text else " ",
-        parse_mode="HTML",
-        reply_markup=get_video_keyboard()
-    )
+    try:
+        await query.message.edit_caption(
+            caption=text if text else " ",
+            parse_mode="HTML",
+            reply_markup=get_video_keyboard()
+        )
+    except Exception:
+        await query.message.edit_caption(
+            caption=text if text else ".",
+            parse_mode=None,
+            reply_markup=get_video_keyboard()
+        )
 
 async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1421,12 +1491,13 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
         caption = format_caption(title, body)
         
-        await context.bot.send_photo(
-            chat_id=CHANNEL_ID,
-            photo=photo_bytes,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=get_post_publish_keyboard()
+        await safe_send_photo(
+            context.bot, 
+            CHANNEL_ID, 
+            photo_bytes, 
+            caption, 
+            "HTML", 
+            get_post_publish_keyboard()
         )
         
         await query.message.reply_text("✅ Пост опубликован в канал!")
@@ -1472,12 +1543,13 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             caption = f"<b>{title}</b>"
         
-        await context.bot.send_photo(
-            chat_id=CHANNEL_ID,
-            photo=file_id,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=get_post_publish_keyboard()
+        await safe_send_photo(
+            context.bot, 
+            CHANNEL_ID, 
+            file_id, 
+            caption, 
+            "HTML", 
+            get_post_publish_keyboard()
         )
         
         await query.message.reply_text("✅ Пост опубликован в канал!")
@@ -1513,21 +1585,28 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         if len(text) > 1000:
             text = text[:1000] + "..."
         
-        if text:
+        if text and text.strip():
             lines = text.split('\n')
             title = lines[0] if lines else ""
             body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
             caption = format_caption(title, body)
         else:
-            caption = " "
+            caption = None
         
-        await context.bot.send_video(
-            chat_id=CHANNEL_ID,
-            video=file_id,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=get_post_publish_keyboard()
-        )
+        if caption:
+            await context.bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=file_id,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        else:
+            await context.bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=file_id,
+                reply_markup=get_post_publish_keyboard()
+            )
         
         await query.message.reply_text("✅ Видео опубликовано!")
         context.chat_data.pop("pending_video", None)
@@ -1553,19 +1632,21 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
         caption = format_caption(news['title'], f"{news_text}\n\n🔗 {news['url']}")
         
         if news.get('photo') and news['photo'].getbuffer().nbytes > 0:
-            await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=news['photo'],
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=get_post_publish_keyboard()
+            await safe_send_photo(
+                context.bot,
+                CHANNEL_ID,
+                news['photo'],
+                caption,
+                "HTML",
+                get_post_publish_keyboard()
             )
         else:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=caption,
-                parse_mode="HTML",
-                reply_markup=get_post_publish_keyboard()
+            await safe_send_message(
+                context.bot,
+                CHANNEL_ID,
+                caption,
+                "HTML",
+                get_post_publish_keyboard()
             )
         
         save_published(news['url'], news['title'])
@@ -1590,12 +1671,13 @@ async def check_scheduled_posts(app: Application):
                 body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
                 caption = format_caption(title, body)
                 
-                await app.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=photo_bytes,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=get_post_publish_keyboard()
+                await safe_send_photo(
+                    app.bot,
+                    CHANNEL_ID,
+                    photo_bytes,
+                    caption,
+                    "HTML",
+                    get_post_publish_keyboard()
                 )
                 
                 delete_scheduled_post(post["id"])
@@ -1609,21 +1691,28 @@ async def check_scheduled_posts(app: Application):
                 if len(text) > 1000:
                     text = text[:1000] + "..."
                 
-                if text:
+                if text and text.strip():
                     lines = text.split('\n')
                     title = lines[0] if lines else ""
                     body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
                     caption = format_caption(title, body)
                 else:
-                    caption = " "
+                    caption = None
                 
-                await app.bot.send_video(
-                    chat_id=CHANNEL_ID,
-                    video=file_id,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=get_post_publish_keyboard()
-                )
+                if caption:
+                    await app.bot.send_video(
+                        chat_id=CHANNEL_ID,
+                        video=file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
+                    )
+                else:
+                    await app.bot.send_video(
+                        chat_id=CHANNEL_ID,
+                        video=file_id,
+                        reply_markup=get_post_publish_keyboard()
+                    )
                 
                 delete_scheduled_video(video["id"])
                 print(f"✅ Опубликовано отложенное видео")
@@ -1650,12 +1739,13 @@ async def check_scheduled_posts(app: Application):
                         continue
                     
                     try:
-                        await app.bot.send_photo(
-                            chat_id=channel_info["channel_id"],
-                            photo=photo_bytes,
-                            caption=caption,
-                            parse_mode="HTML",
-                            reply_markup=get_post_publish_keyboard()
+                        await safe_send_photo(
+                            app.bot,
+                            channel_info["channel_id"],
+                            photo_bytes,
+                            caption,
+                            "HTML",
+                            get_post_publish_keyboard()
                         )
                         success_count += 1
                         print(f"✅ Опубликован отложенный пост в {channel_info['name']}")
@@ -1871,7 +1961,6 @@ async def run_bot():
     else:
         print("⚠️ DeepSeek API не настроен")
     
-    # Проверяем настроенные каналы
     active_channels = [k for k, v in CHANNELS.items() if v["channel_id"]]
     print(f"✅ Активных каналов: {len(active_channels)}")
     for channel_key in active_channels:
