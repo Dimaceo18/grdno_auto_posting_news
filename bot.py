@@ -4,6 +4,8 @@ import csv
 import os
 import re
 import io
+import json
+import uuid
 from io import StringIO
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -25,6 +27,30 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
 
+# Каналы для публикации
+CHANNELS = {
+    "grodno": {
+        "name": "Фидер Гродно",
+        "channel_id": os.getenv("CHANNEL_ID_GRODNO", CHANNEL_ID),
+        "link": os.getenv("CHANNEL_LINK_GRODNO", "https://t.me/grodno_news")
+    },
+    "baranovichi": {
+        "name": "Фидер Барановичи",
+        "channel_id": os.getenv("CHANNEL_ID_BARANOVICHI"),
+        "link": os.getenv("CHANNEL_LINK_BARANOVICHI", "https://t.me/baranovichi_news")
+    },
+    "vitebsk": {
+        "name": "Фидер Витебск",
+        "channel_id": os.getenv("CHANNEL_ID_VITEBSK"),
+        "link": os.getenv("CHANNEL_LINK_VITEBSK", "https://t.me/vitebsk_news")
+    },
+    "brest": {
+        "name": "Фидер Брест",
+        "channel_id": os.getenv("CHANNEL_ID_BREST"),
+        "link": os.getenv("CHANNEL_LINK_BREST", "https://t.me/brest_news")
+    }
+}
+
 # Инициализация DeepSeek клиента
 deepseek_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -32,6 +58,7 @@ deepseek_client = AsyncOpenAI(
 ) if DEEPSEEK_API_KEY else None
 
 pending_news: Dict[str, Dict] = {}
+multi_channel_posts: Dict[str, Dict] = {}
 
 # Промпт для DeepSeek
 DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
@@ -72,6 +99,16 @@ def init_db():
                 created_at TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_multi_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT,
+                photo_bytes BLOB,
+                channels TEXT,
+                schedule_time TIMESTAMP,
+                created_at TIMESTAMP
+            )
+        """)
     print("✅ База данных готова")
 
 def save_scheduled_post(text: str, photo_bytes: bytes, schedule_time: datetime):
@@ -86,6 +123,13 @@ def save_scheduled_video(text: str, file_id: str, schedule_time: datetime):
         conn.execute(
             "INSERT INTO scheduled_videos (text, file_id, schedule_time, created_at) VALUES (?, ?, ?, ?)",
             (text, file_id, schedule_time, datetime.now())
+        )
+
+def save_scheduled_multi_post(text: str, photo_bytes: bytes, channels: List[str], schedule_time: datetime):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_multi_posts (text, photo_bytes, channels, schedule_time, created_at) VALUES (?, ?, ?, ?, ?)",
+            (text, photo_bytes, json.dumps(channels), schedule_time, datetime.now())
         )
 
 def get_pending_scheduled_posts() -> List[Dict]:
@@ -106,6 +150,20 @@ def get_pending_scheduled_videos() -> List[Dict]:
         ).fetchall()
         return [dict(row) for row in result]
 
+def get_pending_scheduled_multi_posts() -> List[Dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        result = conn.execute(
+            "SELECT id, text, photo_bytes, channels, schedule_time FROM scheduled_multi_posts WHERE schedule_time <= ?",
+            (datetime.now(),)
+        ).fetchall()
+        posts = []
+        for row in result:
+            post = dict(row)
+            post['channels'] = json.loads(post['channels'])
+            posts.append(post)
+        return posts
+
 def delete_scheduled_post(post_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (post_id,))
@@ -113,6 +171,10 @@ def delete_scheduled_post(post_id: int):
 def delete_scheduled_video(video_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM scheduled_videos WHERE id = ?", (video_id,))
+
+def delete_scheduled_multi_post(post_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM scheduled_multi_posts WHERE id = ?", (post_id,))
 
 def is_already_published(url: str) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
@@ -372,7 +434,17 @@ def get_post_preview_keyboard():
         [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_text")],
         [InlineKeyboardButton("🤖 Обработать текст (ИИ)", callback_data="ai_process")],
         [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")],
+        [InlineKeyboardButton("🌍 Опубликовать в несколько каналов", callback_data="start_multi_channel")],
         [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_designed_post_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")],
+        [InlineKeyboardButton("🌍 Опубликовать в несколько каналов", callback_data="start_multi_channel_designed")],
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_designed")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -435,12 +507,41 @@ def get_video_schedule_keyboard():
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")])
     return InlineKeyboardMarkup(keyboard)
 
-def get_designed_post_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="publish_designed")],
-        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")],
-        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_designed")]
+def get_channel_selection_keyboard(post_id: str):
+    keyboard = []
+    for channel_key, channel_info in CHANNELS.items():
+        if channel_info["channel_id"]:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📢 {channel_info['name']}", 
+                    callback_data=f"toggle_channel:{post_id}:{channel_key}"
+                )
+            ])
+    keyboard.append([
+        InlineKeyboardButton("✅ Опубликовать в выбранные", callback_data=f"publish_multi_now:{post_id}"),
+        InlineKeyboardButton("⏰ Отложить в выбранные", callback_data=f"schedule_multi:{post_id}")
+    ])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_post_preview")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_multi_schedule_keyboard(post_id: str):
+    schedule_times = [
+        ("Через 30 мин", "30min"),
+        ("9:05", "9:05"), ("10:05", "10:05"), ("10:06", "10:06"), ("11:07", "11:07"),
+        ("12:08", "12:08"), ("13:09", "13:09"), ("14:10", "14:10"), ("15:11", "15:11"),
+        ("16:12", "16:12"), ("17:13", "17:13"), ("18:14", "18:14"), ("19:07", "19:07"),
+        ("20:08", "20:08"), ("21:09", "21:09"), ("22:11", "22:11"), ("22:45", "22:45")
     ]
+    keyboard = []
+    row = []
+    for i, (label, value) in enumerate(schedule_times):
+        row.append(InlineKeyboardButton(label, callback_data=f"multi_schedule_time:{post_id}:{value}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_channel_select:{post_id}")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_publish_keyboard():
@@ -752,13 +853,11 @@ async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFA
 
 # ==================== ОБРАБОТЧИКИ ЗАПРОСОВ ИИ ====================
 async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Для фото
     if context.user_data.get("waiting_for_ai_request"):
         request = update.message.text
         context.user_data["custom_ai_request"] = request
         context.user_data["waiting_for_ai_request"] = False
         await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
-        # Создаём фейковый callback
         class FakeQuery:
             def __init__(self, message):
                 self.message = message
@@ -768,7 +867,6 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ai_process_callback(update, context)
         return
     
-    # Для видео
     if context.user_data.get("waiting_for_ai_request_video"):
         request = update.message.text
         context.user_data["custom_ai_request_video"] = request
@@ -830,6 +928,310 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка: {e}")
+
+# ==================== МУЛЬТИКАНАЛЬНАЯ ПУБЛИКАЦИЯ ====================
+async def start_multi_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.chat_data.get("pending_post", {})
+    if not pending:
+        await query.message.reply_text("❌ Нет поста для публикации")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "type": "photo",
+        "text": pending.get("text", ""),
+        "photo_bytes": pending.get("photo_bytes"),
+        "file_id": pending.get("file_id"),
+        "selected_channels": []
+    }
+    
+    await query.message.reply_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить. Можно выбрать несколько каналов.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id)
+    )
+
+async def start_multi_channel_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    designed = context.chat_data.get("designed_post", {})
+    if not designed:
+        await query.message.reply_text("❌ Нет оформленного поста")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "type": "designed",
+        "text": designed.get("text", ""),
+        "photo_bytes": designed.get("photo_bytes"),
+        "selected_channels": []
+    }
+    
+    await query.message.reply_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить. Можно выбрать несколько каналов.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id)
+    )
+
+async def toggle_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, channel_key = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected = post_data["selected_channels"]
+    
+    if channel_key in selected:
+        selected.remove(channel_key)
+        status = "❌ отменен"
+    else:
+        if CHANNELS.get(channel_key, {}).get("channel_id"):
+            selected.append(channel_key)
+            status = "✅ выбран"
+        else:
+            await query.answer("⚠️ Этот канал не настроен!", show_alert=True)
+            return
+    
+    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected]) if selected else "❌ Ничего не выбрано"
+    
+    await query.message.edit_text(
+        f"🌍 *Выберите каналы для публикации*\n\n"
+        f"*Выбрано:*\n{channels_text}\n\n"
+        f"Нажмите на канал чтобы выбрать/отменить.\n\n"
+        f"📢 {CHANNELS[channel_key]['name']} — {status}",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id)
+    )
+
+async def publish_multi_now_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    post_id = query.data.split(":")[1]
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    await query.message.edit_text("⏳ Публикую в выбранные каналы...")
+    
+    success_count = 0
+    errors = []
+    
+    for channel_key in selected_channels:
+        channel_info = CHANNELS.get(channel_key)
+        if not channel_info or not channel_info["channel_id"]:
+            errors.append(f"{channel_info['name'] if channel_info else channel_key}: канал не настроен")
+            continue
+        
+        try:
+            text = post_data.get("text", "")
+            if len(text) > 1000:
+                text = text[:1000] + "..."
+            
+            lines = text.split('\n')
+            title = lines[0] if lines else ""
+            body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+            caption = format_caption(title, body)
+            
+            if post_data.get("type") == "designed" or post_data.get("photo_bytes"):
+                photo_bytes = post_data.get("photo_bytes")
+                if photo_bytes:
+                    await context.bot.send_photo(
+                        chat_id=channel_info["channel_id"],
+                        photo=photo_bytes,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=channel_info["channel_id"],
+                        text=caption,
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
+                    )
+            else:
+                file_id = post_data.get("file_id")
+                if file_id:
+                    await context.bot.send_photo(
+                        chat_id=channel_info["channel_id"],
+                        photo=file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=channel_info["channel_id"],
+                        text=caption,
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
+                    )
+            
+            success_count += 1
+            print(f"✅ Опубликовано в {channel_info['name']}")
+            
+        except Exception as e:
+            error_msg = f"{channel_info['name']}: {str(e)[:50]}"
+            errors.append(error_msg)
+            print(f"❌ Ошибка при публикации в {channel_info['name']}: {e}")
+    
+    report = f"✅ *Результат публикации*\n\n📊 Успешно: {success_count}/{len(selected_channels)}"
+    if errors:
+        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {err}" for err in errors)
+    
+    await query.message.edit_text(report, parse_mode="Markdown")
+    multi_channel_posts.pop(post_id, None)
+    
+    await asyncio.sleep(5)
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+async def schedule_multi_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    post_id = query.data.split(":")[1]
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected_channels])
+    
+    await query.message.edit_text(
+        f"⏰ *Отложенная публикация*\n\n"
+        f"Будет опубликовано в:\n{channels_text}\n\n"
+        f"Выберите время:",
+        parse_mode="Markdown",
+        reply_markup=get_multi_schedule_keyboard(post_id)
+    )
+
+async def multi_schedule_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, time_value = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = f"{publish_time.strftime('%H:%M')} ({publish_time.strftime('%d.%m')})"
+    
+    text = post_data.get("text", "")
+    photo_bytes = post_data.get("photo_bytes")
+    
+    if not photo_bytes:
+        file_id = post_data.get("file_id")
+        if file_id:
+            try:
+                file = await context.bot.get_file(file_id)
+                photo_bytes = await file.download_as_bytearray()
+            except Exception as e:
+                await query.message.reply_text(f"❌ Не удалось загрузить фото: {e}")
+                return
+    
+    save_scheduled_multi_post(text, photo_bytes, selected_channels, publish_time)
+    
+    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected_channels])
+    
+    await query.message.edit_text(
+        f"✅ *Пост запланирован!*\n\n"
+        f"📅 Время: {time_str}\n"
+        f"📢 Каналы:\n{channels_text}\n\n"
+        f"Пост будет автоматически опубликован в указанные каналы.",
+        parse_mode="Markdown"
+    )
+    
+    multi_channel_posts.pop(post_id, None)
+    
+    await asyncio.sleep(5)
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+async def back_to_channel_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected = post_data.get("selected_channels", [])
+    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected]) if selected else "❌ Ничего не выбрано"
+    
+    await query.message.edit_text(
+        f"🌍 *Выберите каналы для публикации*\n\n"
+        f"*Выбрано:*\n{channels_text}\n\n"
+        f"Нажмите на канал чтобы выбрать/отменить. Можно выбрать несколько каналов.\n\n"
+        f"После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id)
+    )
+
+async def back_to_post_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pending = context.chat_data.get("pending_post", {})
+    text = pending.get("text", "")
+    
+    await query.message.edit_caption(
+        caption=text if text else " ",
+        parse_mode="HTML",
+        reply_markup=get_post_preview_keyboard()
+    )
 
 # ==================== ОТЛОЖЕННАЯ ПУБЛИКАЦИЯ ====================
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1175,7 +1577,6 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def check_scheduled_posts(app: Application):
     while True:
         try:
-            # Проверяем отложенные фото-посты
             posts = get_pending_scheduled_posts()
             for post in posts:
                 photo_bytes = post["photo_bytes"]
@@ -1200,7 +1601,6 @@ async def check_scheduled_posts(app: Application):
                 delete_scheduled_post(post["id"])
                 print(f"✅ Опубликован отложенный фото-пост")
             
-            # Проверяем отложенные видео
             videos = get_pending_scheduled_videos()
             for video in videos:
                 text = video["text"]
@@ -1227,6 +1627,43 @@ async def check_scheduled_posts(app: Application):
                 
                 delete_scheduled_video(video["id"])
                 print(f"✅ Опубликовано отложенное видео")
+            
+            multi_posts = get_pending_scheduled_multi_posts()
+            for post in multi_posts:
+                photo_bytes = post["photo_bytes"]
+                text = post["text"]
+                channels = post["channels"]
+                
+                if len(text) > 1000:
+                    text = text[:1000] + "..."
+                
+                lines = text.split('\n')
+                title = lines[0] if lines else ""
+                body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                caption = format_caption(title, body)
+                
+                success_count = 0
+                for channel_key in channels:
+                    channel_info = CHANNELS.get(channel_key)
+                    if not channel_info or not channel_info["channel_id"]:
+                        print(f"❌ Канал {channel_key} не настроен")
+                        continue
+                    
+                    try:
+                        await app.bot.send_photo(
+                            chat_id=channel_info["channel_id"],
+                            photo=photo_bytes,
+                            caption=caption,
+                            parse_mode="HTML",
+                            reply_markup=get_post_publish_keyboard()
+                        )
+                        success_count += 1
+                        print(f"✅ Опубликован отложенный пост в {channel_info['name']}")
+                    except Exception as e:
+                        print(f"❌ Ошибка публикации в {channel_info['name']}: {e}")
+                
+                print(f"📊 Мультиканальный пост: успешно {success_count}/{len(channels)}")
+                delete_scheduled_multi_post(post["id"])
                 
         except Exception as e:
             print(f"❌ Ошибка в планировщике: {e}")
@@ -1245,6 +1682,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• ✏️ Редактировать текст\n"
         "• 🤖 Обработать текст (ИИ)\n"
         "• 📤 Опубликовать без оформления\n"
+        "• 🌍 Опубликовать в несколько каналов\n"
         "• ⏰ Отложить публикацию\n\n"
         "👇 Нажми кнопку",
         parse_mode="Markdown",
@@ -1373,6 +1811,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "ai_reprocess_video":
         await ai_reprocess_video_callback(update, context)
     
+    elif data == "start_multi_channel":
+        await start_multi_channel_callback(update, context)
+    
+    elif data == "start_multi_channel_designed":
+        await start_multi_channel_designed_callback(update, context)
+    
+    elif data.startswith("toggle_channel:"):
+        await toggle_channel_callback(update, context)
+    
+    elif data.startswith("publish_multi_now:"):
+        await publish_multi_now_callback(update, context)
+    
+    elif data.startswith("schedule_multi:"):
+        await schedule_multi_callback(update, context)
+    
+    elif data.startswith("multi_schedule_time:"):
+        await multi_schedule_time_callback(update, context)
+    
+    elif data.startswith("back_to_channel_select:"):
+        await back_to_channel_select_callback(update, context)
+    
+    elif data == "back_to_post_preview":
+        await back_to_post_preview_callback(update, context)
+    
     elif data.startswith("schedule:"):
         if context.user_data.get("scheduling_designed"):
             await schedule_designed_time_callback(update, context)
@@ -1390,7 +1852,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "Grodno News Bot with AI"}
+    return {"status": "ok", "bot": "Grodno News Bot with Multi-Channel Support"}
 
 @app.get("/health")
 async def health():
@@ -1409,6 +1871,12 @@ async def run_bot():
     else:
         print("⚠️ DeepSeek API не настроен")
     
+    # Проверяем настроенные каналы
+    active_channels = [k for k, v in CHANNELS.items() if v["channel_id"]]
+    print(f"✅ Активных каналов: {len(active_channels)}")
+    for channel_key in active_channels:
+        print(f"   • {CHANNELS[channel_key]['name']}")
+    
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel_edit))
@@ -1425,7 +1893,7 @@ async def run_bot():
     
     await application.updater.start_polling()
     
-    print("✅ Бот запущен с поддержкой отложенных постов и ИИ!")
+    print("✅ Бот запущен с поддержкой мультиканальной публикации и ИИ!")
 
 if __name__ == "__main__":
     import threading
