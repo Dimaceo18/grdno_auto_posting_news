@@ -71,6 +71,25 @@ DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у �
 Заголовок: (заголовок новости)
 Текст: (текст новости на 650 символов)"""
 
+# ==================== ФУНКЦИЯ START ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    await update.message.reply_text(
+        "🤖 *Бот для публикации новостей*\n\n"
+        "📸 *Отправьте мне фото с подписью* - я помогу оформить и опубликовать\n"
+        "📹 *Отправьте видео с подписью* - опубликую в канал\n"
+        "📰 *Нажмите кнопку \"Начать парсинг\"* - получу свежие новости из ленты\n\n"
+        "*Доступные функции:*\n"
+        "• 🎨 Оформление постов с текстом на фото\n"
+        "• ✏️ Редактирование текста\n"
+        "• 🤖 Обработка текста через ИИ (DeepSeek)\n"
+        "• 🌍 Публикация в несколько каналов\n"
+        "• ⏰ Отложенная публикация\n\n"
+        "👇 *Нажмите кнопку ниже*",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def remove_emojis(text: str) -> str:
     if not text:
@@ -539,7 +558,7 @@ def get_channel_selection_keyboard(post_id: str, source: str = "post"):
         InlineKeyboardButton("⏰ Отложить в выбранные", callback_data=f"schedule_selected:{post_id}:{source}")
     ])
     keyboard.append([InlineKeyboardButton("🌍 Опубликовать во все", callback_data=f"publish_all_selected:{post_id}:{source}")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_{source}")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_channels:{post_id}:{source}")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_publish_keyboard():
@@ -1251,7 +1270,6 @@ async def publish_selected_callback(update: Update, context: ContextTypes.DEFAUL
     
     await query.message.edit_text(report, parse_mode="Markdown")
     
-    # Очищаем сессию пользователя
     user_id = post_data.get("user_id")
     if user_id and success == len(selected_channels):
         user_sessions.pop(user_id, None)
@@ -1269,7 +1287,6 @@ async def publish_all_selected_callback(update: Update, context: ContextTypes.DE
         await query.message.reply_text("❌ Пост не найден")
         return
     
-    # Выбираем все активные каналы
     all_channels = [k for k, v in CHANNELS.items() if v["channel_id"]]
     post_data["selected_channels"] = all_channels
     
@@ -1299,7 +1316,6 @@ async def publish_all_selected_callback(update: Update, context: ContextTypes.DE
     
     await query.message.edit_text(report, parse_mode="Markdown")
     
-    # Очищаем сессию пользователя
     user_id = post_data.get("user_id")
     if user_id and success == len(all_channels):
         user_sessions.pop(user_id, None)
