@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 from fastapi import FastAPI
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import httpx
 from bs4 import BeautifulSoup
@@ -73,19 +73,18 @@ DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у �
 
 # ==================== ФУНКЦИЯ START ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     await update.message.reply_text(
         "🤖 *Бот для публикации новостей*\n\n"
         "📸 *Отправьте мне фото с подписью* - я помогу оформить и опубликовать\n"
         "📹 *Отправьте видео с подписью* - опубликую в канал\n"
-        "📰 *Нажмите кнопку \"Начать парсинг\"* - получу свежие новости из ленты\n\n"
+        "📰 *Нажмите кнопку \"Начать парсинг\"* - получу свежие новости\n\n"
         "*Доступные функции:*\n"
         "• 🎨 Оформление постов с текстом на фото\n"
         "• ✏️ Редактирование текста\n"
         "• 🤖 Обработка текста через ИИ (DeepSeek)\n"
         "• 🌍 Публикация в несколько каналов\n"
         "• ⏰ Отложенная публикация\n\n"
-        "👇 *Нажмите кнопку ниже*",
+        "👇 *Нажмите кнопку*",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -589,12 +588,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "photo",
             "text": remove_emojis(caption),
             "photo_bytes": photo_bytes,
-            "video_bytes": None,
-            "file_id": None
+            "photo_file_id": photo.file_id,
+            "video_bytes": None
         }
         
         await message.reply_photo(
-            photo=photo_bytes,
+            photo=photo.file_id,
             caption=f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!",
             reply_markup=get_post_preview_keyboard()
         )
@@ -623,11 +622,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "text": remove_emojis(caption),
             "photo_bytes": None,
             "video_bytes": video_bytes,
-            "file_id": video.file_id
+            "video_file_id": video.file_id,
         }
         
         await message.reply_video(
-            video=video_bytes,
+            video=video.file_id,
             caption=f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!",
             reply_markup=get_video_keyboard()
         )
@@ -668,19 +667,35 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         session["text"] = new_text
         
         if edit_type == "photo":
-            await update.message.reply_text(
-                f"✅ Текст обновлён!\n\n{new_text}",
-                reply_markup=get_post_preview_keyboard()
-            )
+            if session.get("photo_file_id"):
+                await update.message.reply_photo(
+                    photo=session["photo_file_id"],
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_post_preview_keyboard()
+                )
+            elif session.get("photo_bytes"):
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_post_preview_keyboard()
+                )
         elif edit_type == "video":
-            await update.message.reply_text(
-                f"✅ Текст обновлён!\n\n{new_text}",
-                reply_markup=get_video_keyboard()
-            )
+            if session.get("video_file_id"):
+                await update.message.reply_video(
+                    video=session["video_file_id"],
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_video_keyboard()
+                )
+            elif session.get("video_bytes"):
+                await update.message.reply_video(
+                    video=InputFile(io.BytesIO(session["video_bytes"]), filename="video.mp4"),
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_video_keyboard()
+                )
         elif edit_type == "designed":
             if session.get("photo_bytes"):
                 await update.message.reply_photo(
-                    photo=session["photo_bytes"],
+                    photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
                     caption=f"{new_text}\n\n✅ Текст обновлён!",
                     reply_markup=get_designed_post_keyboard()
                 )
@@ -719,12 +734,13 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("🎨 Оформляю пост...")
         
         photo_io = process_photo(session["photo_bytes"], title_for_photo)
+        processed_bytes = photo_io.getvalue()
         
-        session["photo_bytes"] = photo_io.getvalue()
+        session["photo_bytes"] = processed_bytes
         session["designed"] = True
         
         await query.message.reply_photo(
-            photo=photo_io,
+            photo=InputFile(io.BytesIO(processed_bytes), filename="post.jpg"),
             caption=f"{full_text}\n\n✅ Пост оформлен!",
             reply_markup=get_designed_post_keyboard()
         )
@@ -735,7 +751,7 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await query.message.reply_text(f"⚠️ Ошибка: {e}")
+        await query.message.reply_text(f"⚠️ Ошибка оформления: {e}")
 
 # ==================== ОБРАБОТКА ИИ ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -787,14 +803,21 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        await query.message.reply_text(
-            f"✅ *Текст обработан!*\n\n"
-            f"📰 *Заголовок:* {title}\n\n"
-            f"📝 *Текст:*\n{body[:300]}...\n\n"
-            f"Выберите действие:",
-            parse_mode="Markdown",
-            reply_markup=get_ai_result_keyboard()
-        )
+        # Показываем результат
+        if session.get("photo_file_id"):
+            await query.message.reply_photo(
+                photo=session["photo_file_id"],
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_ai_result_keyboard()
+            )
+        elif session.get("photo_bytes"):
+            await query.message.reply_photo(
+                photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_ai_result_keyboard()
+            )
         
         try:
             await query.message.delete()
@@ -854,14 +877,20 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        await query.message.reply_text(
-            f"✅ *Текст обработан!*\n\n"
-            f"📰 *Заголовок:* {title}\n\n"
-            f"📝 *Текст:*\n{body[:300]}...\n\n"
-            f"Выберите действие:",
-            parse_mode="Markdown",
-            reply_markup=get_video_ai_result_keyboard()
-        )
+        if session.get("video_file_id"):
+            await query.message.reply_video(
+                video=session["video_file_id"],
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
+        elif session.get("video_bytes"):
+            await query.message.reply_video(
+                video=InputFile(io.BytesIO(session["video_bytes"]), filename="video.mp4"),
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
         
         try:
             await query.message.delete()
@@ -947,7 +976,7 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if caption:
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=photo_bytes,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=get_post_publish_keyboard()
@@ -955,7 +984,7 @@ async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=photo_bytes,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                 reply_markup=get_post_publish_keyboard()
             )
         
@@ -995,7 +1024,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         if caption:
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=photo_bytes,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=get_post_publish_keyboard()
@@ -1003,7 +1032,7 @@ async def publish_designed_callback(update: Update, context: ContextTypes.DEFAUL
         else:
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=photo_bytes,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                 reply_markup=get_post_publish_keyboard()
             )
         
@@ -1043,7 +1072,7 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         if caption:
             await context.bot.send_video(
                 chat_id=CHANNEL_ID,
-                video=video_bytes,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=get_post_publish_keyboard()
@@ -1051,7 +1080,7 @@ async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_T
         else:
             await context.bot.send_video(
                 chat_id=CHANNEL_ID,
-                video=video_bytes,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                 reply_markup=get_post_publish_keyboard()
             )
         
@@ -1080,27 +1109,27 @@ async def publish_to_single_channel(bot, channel_id, text, photo_bytes, video_by
         if caption:
             return await bot.send_video(
                 chat_id=channel_id,
-                video=video_bytes,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                 caption=caption,
                 parse_mode="HTML"
             )
         else:
             return await bot.send_video(
                 chat_id=channel_id,
-                video=video_bytes
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4")
             )
     elif photo_bytes:
         if caption:
             return await bot.send_photo(
                 chat_id=channel_id,
-                photo=photo_bytes,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                 caption=caption,
                 parse_mode="HTML"
             )
         else:
             return await bot.send_photo(
                 chat_id=channel_id,
-                photo=photo_bytes
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
             )
     else:
         return await bot.send_message(
@@ -1593,7 +1622,7 @@ async def back_to_preview_callback(update: Update, context: ContextTypes.DEFAULT
         photo_bytes = session.get("photo_bytes")
         
         await query.message.reply_photo(
-            photo=photo_bytes,
+            photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
             caption=text if text else "Пост",
             reply_markup=get_post_preview_keyboard()
         )
@@ -1614,7 +1643,7 @@ async def back_to_video_preview_callback(update: Update, context: ContextTypes.D
         video_bytes = session.get("video_bytes")
         
         await query.message.reply_video(
-            video=video_bytes,
+            video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
             caption=text if text else "Видео",
             reply_markup=get_video_keyboard()
         )
@@ -1682,7 +1711,7 @@ async def start_parsing_callback(update: Update, context: ContextTypes.DEFAULT_T
         
         if processed_photo:
             await query.message.reply_photo(
-                photo=processed_photo,
+                photo=InputFile(io.BytesIO(processed_photo.getvalue()), filename="news.jpg"),
                 caption=caption,
                 parse_mode="Markdown",
                 reply_markup=get_news_keyboard(news_id)
@@ -1719,7 +1748,7 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if news.get('photo'):
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=news['photo'],
+                photo=InputFile(io.BytesIO(news['photo'].getvalue()), filename="news.jpg"),
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=get_post_publish_keyboard()
@@ -1773,7 +1802,7 @@ async def check_scheduled_posts(app: Application):
                 if caption:
                     await app.bot.send_photo(
                         chat_id=CHANNEL_ID,
-                        photo=photo_bytes,
+                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                         caption=caption,
                         parse_mode="HTML",
                         reply_markup=get_post_publish_keyboard()
@@ -1781,7 +1810,7 @@ async def check_scheduled_posts(app: Application):
                 else:
                     await app.bot.send_photo(
                         chat_id=CHANNEL_ID,
-                        photo=photo_bytes,
+                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                         reply_markup=get_post_publish_keyboard()
                     )
                 
@@ -1802,7 +1831,7 @@ async def check_scheduled_posts(app: Application):
                 if caption:
                     await app.bot.send_video(
                         chat_id=CHANNEL_ID,
-                        video=video_bytes,
+                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                         caption=caption,
                         parse_mode="HTML",
                         reply_markup=get_post_publish_keyboard()
@@ -1810,7 +1839,7 @@ async def check_scheduled_posts(app: Application):
                 else:
                     await app.bot.send_video(
                         chat_id=CHANNEL_ID,
-                        video=video_bytes,
+                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                         reply_markup=get_post_publish_keyboard()
                     )
                 
@@ -1839,14 +1868,14 @@ async def check_scheduled_posts(app: Application):
                         if caption:
                             await app.bot.send_photo(
                                 chat_id=channel_info["channel_id"],
-                                photo=photo_bytes,
+                                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                                 caption=caption,
                                 parse_mode="HTML"
                             )
                         else:
                             await app.bot.send_photo(
                                 chat_id=channel_info["channel_id"],
-                                photo=photo_bytes
+                                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
                             )
                         success_count += 1
                         print(f"✅ Опубликован отложенный пост в {channel_info['name']}")
