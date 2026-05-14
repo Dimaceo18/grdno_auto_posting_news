@@ -1737,8 +1737,16 @@ async def run_bot():
     init_db()
     
     bot = Bot(token=BOT_TOKEN)
-    await bot.delete_webhook()
-    print("✅ Webhook удалён")
+    
+    # ПРИНУДИТЕЛЬНО УДАЛЯЕМ ВЕБХУК
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook удалён")
+    except Exception as e:
+        print(f"⚠️ Ошибка при удалении webhook: {e}")
+    
+    # Даем время на удаление
+    await asyncio.sleep(1)
     
     if deepseek_client:
         print("✅ DeepSeek API подключен")
@@ -1751,6 +1759,7 @@ async def run_bot():
         if ch["channel_id"]:
             print(f"   • {ch['name']}: {ch['channel_id']}")
     
+    # Создаем приложение с увеличенным таймаутом
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Команды
@@ -1817,7 +1826,11 @@ async def run_bot():
     
     asyncio.create_task(check_scheduled_posts(application))
     
-    await application.updater.start_polling()
+    # Запускаем polling с правильными параметрами
+    await application.updater.start_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True
+    )
     
     print("✅ Бот запущен!")
 
