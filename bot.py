@@ -5,6 +5,7 @@ import os
 import re
 import io
 import json
+import uuid
 from io import StringIO
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -31,18 +32,22 @@ CHANNELS = {
     "grodno": {
         "name": "Фидер Гродно",
         "channel_id": os.getenv("CHANNEL_ID_GRODNO", CHANNEL_ID),
+        "link": os.getenv("CHANNEL_LINK_GRODNO", "https://t.me/grodno_news")
     },
     "baranovichi": {
         "name": "Фидер Барановичи",
         "channel_id": os.getenv("CHANNEL_ID_BARANOVICHI"),
+        "link": os.getenv("CHANNEL_LINK_BARANOVICHI", "https://t.me/baranovichi_news")
     },
     "vitebsk": {
         "name": "Фидер Витебск",
         "channel_id": os.getenv("CHANNEL_ID_VITEBSK"),
+        "link": os.getenv("CHANNEL_LINK_VITEBSK", "https://t.me/vitebsk_news")
     },
     "brest": {
         "name": "Фидер Брест",
         "channel_id": os.getenv("CHANNEL_ID_BREST"),
+        "link": os.getenv("CHANNEL_LINK_BREST", "https://t.me/brest_news")
     }
 }
 
@@ -54,6 +59,7 @@ deepseek_client = AsyncOpenAI(
 
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
+multi_channel_posts: Dict[str, Dict] = {}
 
 # Промпт для DeepSeek
 DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
@@ -69,7 +75,7 @@ DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у �
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Бот для публикации новостей*\n\n"
-        "📸 *Отправьте мне фото с подписью* - опубликую в канал\n"
+        "📸 *Отправьте мне фото с подписью* - я помогу оформить и опубликовать\n"
         "📹 *Отправьте видео с подписью* - опубликую в канал\n"
         "📰 *Нажмите кнопку \"Начать парсинг\"* - получу свежие новости\n\n"
         "*Доступные функции:*\n"
@@ -142,7 +148,7 @@ def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[
         lines.append(' '.join(current_line))
     return lines
 
-def process_photo(photo_bytes: bytes, title_text: str) -> bytes:
+def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     if not photo_bytes or len(photo_bytes) == 0:
         raise ValueError("Фото пустое")
     print(f"🖼️ Обработка фото, размер: {len(photo_bytes) / 1024:.1f}KB")
@@ -243,8 +249,8 @@ def process_photo(photo_bytes: bytes, title_text: str) -> bytes:
     output.seek(0)
     if output.getbuffer().nbytes == 0:
         raise ValueError("Результирующий файл пустой")
-    print(f"✅ Фото готово: {output.getbuffer().nbytes / (1024 * 1024):.2f}MB")
-    return output.getvalue()
+    print(f"✅ Фото готово: {output.getbuffer().nbytes / (1024 * 1024):.2f}MB, строк: {len(lines)}")
+    return output
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -262,7 +268,6 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT,
                 photo_bytes BLOB,
-                channel_id TEXT,
                 schedule_time TIMESTAMP,
                 created_at TIMESTAMP
             )
@@ -272,32 +277,48 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT,
                 video_bytes BLOB,
-                channel_id TEXT,
+                schedule_time TIMESTAMP,
+                created_at TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_multi_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT,
+                photo_bytes BLOB,
+                channels TEXT,
                 schedule_time TIMESTAMP,
                 created_at TIMESTAMP
             )
         """)
     print("✅ База данных готова")
 
-def save_scheduled_post(text: str, photo_bytes: bytes, channel_id: str, schedule_time: datetime):
+def save_scheduled_post(text: str, photo_bytes: bytes, schedule_time: datetime):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO scheduled_posts (text, photo_bytes, channel_id, schedule_time, created_at) VALUES (?, ?, ?, ?, ?)",
-            (text, photo_bytes, channel_id, schedule_time, datetime.now())
+            "INSERT INTO scheduled_posts (text, photo_bytes, schedule_time, created_at) VALUES (?, ?, ?, ?)",
+            (text, photo_bytes, schedule_time, datetime.now())
         )
 
-def save_scheduled_video(text: str, video_bytes: bytes, channel_id: str, schedule_time: datetime):
+def save_scheduled_video(text: str, video_bytes: bytes, schedule_time: datetime):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO scheduled_videos (text, video_bytes, channel_id, schedule_time, created_at) VALUES (?, ?, ?, ?, ?)",
-            (text, video_bytes, channel_id, schedule_time, datetime.now())
+            "INSERT INTO scheduled_videos (text, video_bytes, schedule_time, created_at) VALUES (?, ?, ?, ?)",
+            (text, video_bytes, schedule_time, datetime.now())
+        )
+
+def save_scheduled_multi_post(text: str, photo_bytes: bytes, channels: List[str], schedule_time: datetime):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_multi_posts (text, photo_bytes, channels, schedule_time, created_at) VALUES (?, ?, ?, ?, ?)",
+            (text, photo_bytes, json.dumps(channels), schedule_time, datetime.now())
         )
 
 def get_pending_scheduled_posts() -> List[Dict]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         result = conn.execute(
-            "SELECT id, text, photo_bytes, channel_id, schedule_time FROM scheduled_posts WHERE schedule_time <= ?",
+            "SELECT id, text, photo_bytes, schedule_time FROM scheduled_posts WHERE schedule_time <= ?",
             (datetime.now(),)
         ).fetchall()
         return [dict(row) for row in result]
@@ -306,10 +327,24 @@ def get_pending_scheduled_videos() -> List[Dict]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         result = conn.execute(
-            "SELECT id, text, video_bytes, channel_id, schedule_time FROM scheduled_videos WHERE schedule_time <= ?",
+            "SELECT id, text, video_bytes, schedule_time FROM scheduled_videos WHERE schedule_time <= ?",
             (datetime.now(),)
         ).fetchall()
         return [dict(row) for row in result]
+
+def get_pending_scheduled_multi_posts() -> List[Dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        result = conn.execute(
+            "SELECT id, text, photo_bytes, channels, schedule_time FROM scheduled_multi_posts WHERE schedule_time <= ?",
+            (datetime.now(),)
+        ).fetchall()
+        posts = []
+        for row in result:
+            post = dict(row)
+            post['channels'] = json.loads(post['channels'])
+            posts.append(post)
+        return posts
 
 def delete_scheduled_post(post_id: int):
     with sqlite3.connect(DB_PATH) as conn:
@@ -318,6 +353,10 @@ def delete_scheduled_post(post_id: int):
 def delete_scheduled_video(video_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM scheduled_videos WHERE id = ?", (video_id,))
+
+def delete_scheduled_multi_post(post_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM scheduled_multi_posts WHERE id = ?", (post_id,))
 
 def is_already_published(url: str) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
@@ -401,43 +440,67 @@ async def fetch_article_text(url: str) -> str:
 
 # ==================== КНОПКИ ====================
 def get_main_keyboard():
-    keyboard = [[InlineKeyboardButton("📰 Начать парсинг", callback_data="start_parsing")]]
+    keyboard = [[InlineKeyboardButton("📰 Начать парсинг (10 новостей)", callback_data="start_parsing")]]
     return InlineKeyboardMarkup(keyboard)
 
 def get_news_keyboard(news_id: str):
     keyboard = [[
-        InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish_news:{news_id}"),
+        InlineKeyboardButton("✅ Опубликовать в канал", callback_data=f"publish_news:{news_id}"),
         InlineKeyboardButton("❌ Пропустить", callback_data=f"skip_news:{news_id}")
     ]]
     return InlineKeyboardMarkup(keyboard)
 
-def get_post_keyboard():
+def get_post_preview_keyboard():
     keyboard = [
-        [InlineKeyboardButton("🎨 Оформить", callback_data="design_post")],
-        [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_text")],
-        [InlineKeyboardButton("🤖 Обработать ИИ", callback_data="ai_process")],
-        [InlineKeyboardButton("📤 Опубликовать", callback_data="publish_now")],
-        [InlineKeyboardButton("🌍 Выбрать канал", callback_data="select_channel")],
-        [InlineKeyboardButton("⏰ Отложить", callback_data="schedule_post")]
+        [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_text")],
+        [InlineKeyboardButton("🤖 Обработать текст (ИИ)", callback_data="ai_process")],
+        [InlineKeyboardButton("📤 Опубликовать без оформления", callback_data="publish_raw")],
+        [InlineKeyboardButton("🌍 Опубликовать в несколько каналов", callback_data="start_multi_channel")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_video_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_video_text")],
+        [InlineKeyboardButton("🤖 Обработать текст (ИИ)", callback_data="ai_process_video")],
+        [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")],
+        [InlineKeyboardButton("🌍 Опубликовать в несколько каналов", callback_data="start_multi_channel_video")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_video_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_designed_post_keyboard():
     keyboard = [
-        [InlineKeyboardButton("✅ Опубликовать", callback_data="publish_now")],
-        [InlineKeyboardButton("🌍 Выбрать канал", callback_data="select_channel")],
-        [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_text")],
-        [InlineKeyboardButton("⏰ Отложить", callback_data="schedule_post")]
+        [InlineKeyboardButton("✅ Опубликовать в основной канал", callback_data="publish_designed")],
+        [InlineKeyboardButton("🌍 Опубликовать во все каналы", callback_data="publish_to_all_channels")],
+        [InlineKeyboardButton("🎯 Выбрать каналы", callback_data="select_channels_for_designed")],
+        [InlineKeyboardButton("✏️ Редактировать текст", callback_data="edit_designed_text")],
+        [InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_designed")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_channel_keyboard():
-    keyboard = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            keyboard.append([InlineKeyboardButton(f"📢 {channel['name']}", callback_data=f"channel_{key}")])
-    keyboard.append([InlineKeyboardButton("🌍 ВСЕ КАНАЛЫ", callback_data="channel_all")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_post")])
+def get_ai_result_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("✅ Опубликовать в основной канал", callback_data="publish_raw")],
+        [InlineKeyboardButton("🌍 Опубликовать во все каналы", callback_data="publish_to_all_channels_from_ai")],
+        [InlineKeyboardButton("🎯 Выбрать каналы", callback_data="select_channels_from_ai")],
+        [InlineKeyboardButton("🎨 Оформить пост", callback_data="design_post")],
+        [InlineKeyboardButton("🔄 Переделать текст", callback_data="ai_reprocess")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_preview")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_video_ai_result_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📹 Опубликовать видео", callback_data="publish_video")],
+        [InlineKeyboardButton("🌍 Опубликовать во все каналы", callback_data="publish_video_to_all_channels")],
+        [InlineKeyboardButton("🎯 Выбрать каналы для видео", callback_data="select_channels_for_video")],
+        [InlineKeyboardButton("✏️ Редактировать вручную", callback_data="edit_video_text")],
+        [InlineKeyboardButton("🔄 Переделать текст", callback_data="ai_reprocess_video")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_schedule_keyboard():
@@ -451,24 +514,63 @@ def get_schedule_keyboard():
     ]
     keyboard = []
     row = []
-    for label, value in schedule_times:
+    for i, (label, value) in enumerate(schedule_times):
         row.append(InlineKeyboardButton(label, callback_data=f"schedule_time:{value}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_post")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_preview")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_video_schedule_keyboard():
+    schedule_times = [
+        ("Через 30 мин", "30min"),
+        ("9:05", "9:05"), ("10:05", "10:05"), ("11:05", "11:05"),
+        ("12:05", "12:05"), ("13:05", "13:05"), ("14:05", "14:05"),
+        ("15:05", "15:05"), ("16:05", "16:05"), ("17:05", "17:05"),
+        ("18:05", "18:05"), ("19:05", "19:05"), ("20:05", "20:05"),
+        ("21:05", "21:05"), ("22:05", "22:05")
+    ]
+    keyboard = []
+    row = []
+    for i, (label, value) in enumerate(schedule_times):
+        row.append(InlineKeyboardButton(label, callback_data=f"schedule_video_time:{value}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_channel_selection_keyboard(post_id: str, source: str = "post"):
+    keyboard = []
+    for channel_key, channel_info in CHANNELS.items():
+        if channel_info["channel_id"]:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📢 {channel_info['name']}", 
+                    callback_data=f"toggle_channel:{post_id}:{channel_key}:{source}"
+                )
+            ])
+    keyboard.append([
+        InlineKeyboardButton("✅ Опубликовать в выбранные", callback_data=f"publish_selected:{post_id}:{source}"),
+        InlineKeyboardButton("⏰ Отложить в выбранные", callback_data=f"schedule_selected:{post_id}:{source}")
+    ])
+    keyboard.append([InlineKeyboardButton("🌍 Опубликовать во все", callback_data=f"publish_all_selected:{post_id}:{source}")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_channels:{post_id}:{source}")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_post_publish_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📢 Подписаться", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("📝 Прислать новость", url=SUGGEST_LINK)]
+        [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("📝 Прислать нам новость", url=SUGGEST_LINK)]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+# ==================== ОБРАБОТЧИКИ ПОЛУЧЕНИЯ МЕДИА ====================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = message.from_user.id
@@ -479,6 +581,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = message.caption or ""
     photo = message.photo[-1]
     
+    print(f"📸 Получено фото от {user_id}")
+    
     try:
         file = await context.bot.get_file(photo.file_id)
         photo_bytes = await file.download_as_bytearray()
@@ -487,18 +591,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "photo",
             "text": remove_emojis(caption),
             "photo_bytes": photo_bytes,
-            "video_bytes": None
+            "photo_file_id": photo.file_id,
+            "video_bytes": None,
+            "video_file_id": None
         }
         
-        # Отправляем обратно то же фото (используем file_id, а не байты)
         await message.reply_photo(
             photo=photo.file_id,
             caption=f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!",
-            reply_markup=get_post_keyboard()
+            reply_markup=get_post_preview_keyboard()
         )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await message.reply_text(f"❌ Ошибка: {e}")
+        await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -510,6 +615,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = message.caption or ""
     video = message.video
     
+    print(f"📹 Получено видео от {user_id}")
+    
     try:
         file = await context.bot.get_file(video.file_id)
         video_bytes = await file.download_as_bytearray()
@@ -518,19 +625,93 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "video",
             "text": remove_emojis(caption),
             "photo_bytes": None,
-            "video_bytes": video_bytes
+            "photo_file_id": None,
+            "video_bytes": video_bytes,
+            "video_file_id": video.file_id,
         }
         
-        # Отправляем обратно то же видео (используем file_id)
         await message.reply_video(
             video=video.file_id,
             caption=f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!",
-            reply_markup=get_post_keyboard()
+            reply_markup=get_video_keyboard()
         )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-        await message.reply_text(f"❌ Ошибка: {e}")
+        await message.reply_text(f"❌ Ошибка загрузки видео: {e}")
 
+# ==================== РЕДАКТИРОВАНИЕ ТЕКСТА ====================
+async def edit_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["waiting_for_edit"] = "photo"
+    await query.message.reply_text("✏️ Отправьте новый текст для поста. Или /cancel для отмены.")
+
+async def edit_video_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["waiting_for_edit"] = "video"
+    await query.message.reply_text("✏️ Отправьте новый текст для видео. Или /cancel для отмены.")
+
+async def edit_designed_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["waiting_for_edit"] = "designed"
+    await query.message.reply_text("✏️ Отправьте новый текст для поста. Или /cancel для отмены.")
+
+async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    edit_type = context.user_data.get("waiting_for_edit")
+    
+    if not edit_type:
+        return
+    
+    new_text = update.message.text
+    session = user_sessions.get(user_id)
+    
+    if session:
+        session["text"] = new_text
+        
+        if edit_type == "photo":
+            if session.get("photo_file_id"):
+                await update.message.reply_photo(
+                    photo=session["photo_file_id"],
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_post_preview_keyboard()
+                )
+            elif session.get("photo_bytes"):
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_post_preview_keyboard()
+                )
+        elif edit_type == "video":
+            if session.get("video_file_id"):
+                await update.message.reply_video(
+                    video=session["video_file_id"],
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_video_keyboard()
+                )
+            elif session.get("video_bytes"):
+                await update.message.reply_video(
+                    video=InputFile(io.BytesIO(session["video_bytes"]), filename="video.mp4"),
+                    caption=f"✅ Текст обновлён!\n\n{new_text}",
+                    reply_markup=get_video_keyboard()
+                )
+        elif edit_type == "designed":
+            if session.get("photo_bytes"):
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                    caption=f"{new_text}\n\n✅ Текст обновлён!",
+                    reply_markup=get_designed_post_keyboard()
+                )
+    
+    context.user_data["waiting_for_edit"] = None
+
+async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["waiting_for_edit"] = None
+    await update.message.reply_text("✅ Редактирование отменено.")
+
+# ==================== ОФОРМЛЕНИЕ ПОСТА ====================
 async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -542,43 +723,49 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Оформить можно только фото")
         return
     
-    text = session.get("text", "")
-    title = text.split('\n')[0][:100] if text else "Пост"
+    full_text = session.get("text", "")
+    if not full_text:
+        await query.message.reply_text("❌ Нет текста")
+        return
+    
+    lines = full_text.split('\n')
+    title_for_photo = lines[0][:150] if lines else "Пост"
     
     if not session.get("photo_bytes"):
         await query.message.reply_text("❌ Нет фото")
         return
     
     try:
-        await query.message.reply_text("🎨 Оформляю...")
-        processed = process_photo(session["photo_bytes"], title)
-        session["photo_bytes"] = processed
+        await query.message.reply_text("🎨 Оформляю пост...")
         
-        # Отправляем обработанное фото через InputFile
+        photo_io = process_photo(session["photo_bytes"], title_for_photo)
+        processed_bytes = photo_io.getvalue()
+        
+        session["photo_bytes"] = processed_bytes
+        session["photo_file_id"] = None  # Очищаем file_id, так как фото изменено
+        session["designed"] = True
+        
         await query.message.reply_photo(
-            photo=InputFile(io.BytesIO(processed), filename="post.jpg"),
-            caption=f"✨ Оформлено!\n\n{text}" if text else "✨ Оформлено!",
+            photo=InputFile(io.BytesIO(processed_bytes), filename="post.jpg"),
+            caption=f"{full_text}\n\n✅ Пост оформлен!",
             reply_markup=get_designed_post_keyboard()
         )
+        
         try:
             await query.message.delete()
         except:
             pass
     except Exception as e:
-        await query.message.reply_text(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"⚠️ Ошибка оформления: {e}")
 
-async def edit_text_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["editing"] = True
-    await query.message.reply_text("✏️ Отправьте новый текст:")
-
+# ==================== ОБРАБОТКА ИИ ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     if not deepseek_client:
-        await query.message.reply_text("❌ API DeepSeek не настроен")
+        await query.message.reply_text("❌ API DeepSeek не настроен.")
         return
     
     user_id = query.from_user.id
@@ -590,10 +777,10 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     text = session.get("text", "")
     if not text:
-        await query.message.reply_text("❌ Нет текста")
+        await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    await query.message.reply_text("🤖 Обрабатываю...")
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
     
     try:
         response = await deepseek_client.chat.completions.create(
@@ -606,34 +793,53 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             max_tokens=1000
         )
         
-        processed = response.choices[0].message.content
+        processed_text = response.choices[0].message.content
         
         title = ""
         body = ""
-        for line in processed.split('\n'):
+        for line in processed_text.split('\n'):
             if line.startswith("Заголовок:"):
                 title = line.replace("Заголовок:", "").strip()
             elif line.startswith("Текст:"):
                 body = line.replace("Текст:", "").strip()
         
-        new_text = f"{title}\n\n{body}" if title and body else processed
+        if not title and not body:
+            body = processed_text
+        
+        new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        await query.message.reply_text(
-            f"✅ *Обработано!*\n\n{new_text[:500]}...",
-            parse_mode="Markdown",
-            reply_markup=get_post_keyboard()
-        )
+        if session.get("photo_file_id"):
+            await query.message.reply_photo(
+                photo=session["photo_file_id"],
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_ai_result_keyboard()
+            )
+        elif session.get("photo_bytes"):
+            await query.message.reply_photo(
+                photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_ai_result_keyboard()
+            )
+        
         try:
             await query.message.delete()
         except:
             pass
+        
     except Exception as e:
-        await query.message.reply_text(f"❌ Ошибка ИИ: {e}")
+        print(f"❌ Ошибка DeepSeek: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
 
-async def publish_now_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    if not deepseek_client:
+        await query.message.reply_text("❌ API DeepSeek не настроен.")
+        return
     
     user_id = query.from_user.id
     session = user_sessions.get(user_id)
@@ -642,77 +848,301 @@ async def publish_now_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ Нет данных")
         return
     
-    await query.message.reply_text("⏳ Публикую...")
+    text = session.get("text", "")
+    if not text:
+        await query.message.reply_text("❌ Нет текста для обработки")
+        return
+    
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
+    
+    try:
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": DEEPSEEK_PROMPT},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        processed_text = response.choices[0].message.content
+        
+        title = ""
+        body = ""
+        for line in processed_text.split('\n'):
+            if line.startswith("Заголовок:"):
+                title = line.replace("Заголовок:", "").strip()
+            elif line.startswith("Текст:"):
+                body = line.replace("Текст:", "").strip()
+        
+        if not title and not body:
+            body = processed_text
+        
+        new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
+        session["text"] = new_text
+        
+        if session.get("video_file_id"):
+            await query.message.reply_video(
+                video=session["video_file_id"],
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
+        elif session.get("video_bytes"):
+            await query.message.reply_video(
+                video=InputFile(io.BytesIO(session["video_bytes"]), filename="video.mp4"),
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+    except Exception as e:
+        print(f"❌ Ошибка DeepSeek: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
+
+async def ai_reprocess_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.reply_text(
+        "📝 *Введите ваш запрос для переделки текста*\n\n"
+        "Примеры:\n"
+        "• Сделай заголовок броским\n"
+        "• Сократи до 400 символов\n"
+        "• Сделай более официальным\n\n"
+        "Или /cancel для отмены.",
+        parse_mode="Markdown"
+    )
+    
+    context.user_data["waiting_for_ai_request"] = True
+
+async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.reply_text(
+        "📝 *Введите ваш запрос для переделки текста видео*\n\n"
+        "Примеры:\n"
+        "• Сделай заголовок броским\n"
+        "• Сократи до 400 символов\n"
+        "• Сделай более официальным\n\n"
+        "Или /cancel для отмены.",
+        parse_mode="Markdown"
+    )
+    
+    context.user_data["waiting_for_ai_request_video"] = True
+
+async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("waiting_for_ai_request"):
+        request = update.message.text
+        context.user_data["custom_ai_request"] = request
+        context.user_data["waiting_for_ai_request"] = False
+        await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
+        await ai_process_callback(update, context)
+        return
+    
+    if context.user_data.get("waiting_for_ai_request_video"):
+        request = update.message.text
+        context.user_data["custom_ai_request_video"] = request
+        context.user_data["waiting_for_ai_request_video"] = False
+        await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
+        await ai_process_video_callback(update, context)
+        return
+
+# ==================== ПУБЛИКАЦИЯ ====================
+async def publish_to_single_channel(bot, channel_id, text, photo_bytes, video_bytes=None, is_video=False):
+    if len(text) > 1000:
+        text = text[:1000] + "..."
+    
+    lines = text.split('\n')
+    title = lines[0] if lines else ""
+    body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+    caption = format_caption(title, body)
+    
+    if is_video and video_bytes:
+        if caption:
+            return await bot.send_video(
+                chat_id=channel_id,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            return await bot.send_video(
+                chat_id=channel_id,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4")
+            )
+    elif photo_bytes:
+        if caption:
+            return await bot.send_photo(
+                chat_id=channel_id,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            return await bot.send_photo(
+                chat_id=channel_id,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
+            )
+    else:
+        return await bot.send_message(
+            chat_id=channel_id,
+            text=caption if caption else "."
+        )
+
+async def publish_raw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session or session.get("type") != "photo":
+        await query.message.reply_text("❌ Нет поста для публикации")
+        return
+    
+    await query.message.reply_text("⏳ Публикую в основной канал...")
     
     try:
         text = session.get("text", "")
         photo_bytes = session.get("photo_bytes")
-        video_bytes = session.get("video_bytes")
-        is_video = session.get("type") == "video"
         
         lines = text.split('\n')
         title = lines[0] if lines else ""
         body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
         caption = format_caption(title, body)
         
-        if is_video and video_bytes:
-            if caption:
-                await context.bot.send_video(
-                    chat_id=CHANNEL_ID,
-                    video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=get_post_publish_keyboard()
-                )
-            else:
-                await context.bot.send_video(
-                    chat_id=CHANNEL_ID,
-                    video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                    reply_markup=get_post_publish_keyboard()
-                )
-        elif photo_bytes:
-            if caption:
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=get_post_publish_keyboard()
-                )
-            else:
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                    reply_markup=get_post_publish_keyboard()
-                )
-        else:
-            await context.bot.send_message(
+        if caption:
+            await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
-                text=caption if caption else ".",
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        else:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                 reply_markup=get_post_publish_keyboard()
             )
         
-        await query.message.reply_text("✅ Опубликовано!")
+        await query.message.reply_text("✅ Пост опубликован в основной канал!")
         user_sessions.pop(user_id, None)
+        
         try:
             await query.message.delete()
         except:
             pass
     except Exception as e:
+        print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"❌ Ошибка: {e}")
 
-async def select_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def publish_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    await query.message.edit_text(
-        "🌍 *Выберите канал для публикации*\n\n"
-        "Нажмите на нужный канал:",
-        parse_mode="Markdown",
-        reply_markup=get_channel_keyboard()
-    )
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет оформленного поста")
+        return
+    
+    await query.message.reply_text("⏳ Публикую в основной канал...")
+    
+    try:
+        text = session.get("text", "")
+        photo_bytes = session.get("photo_bytes")
+        
+        lines = text.split('\n')
+        title = lines[0] if lines else ""
+        body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+        caption = format_caption(title, body)
+        
+        if caption:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        else:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                reply_markup=get_post_publish_keyboard()
+            )
+        
+        await query.message.reply_text("✅ Пост опубликован в основной канал!")
+        user_sessions.pop(user_id, None)
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
 
-async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def publish_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session or session.get("type") != "video":
+        await query.message.reply_text("❌ Нет видео")
+        return
+    
+    await query.message.reply_text("⏳ Публикую видео...")
+    
+    try:
+        text = session.get("text", "")
+        video_bytes = session.get("video_bytes")
+        
+        lines = text.split('\n')
+        title = lines[0] if lines else ""
+        body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+        caption = format_caption(title, body)
+        
+        if caption:
+            await context.bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        else:
+            await context.bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                reply_markup=get_post_publish_keyboard()
+            )
+        
+        await query.message.reply_text("✅ Видео опубликовано!")
+        user_sessions.pop(user_id, None)
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
+
+# ==================== МУЛЬТИКАНАЛЬНАЯ ПУБЛИКАЦИЯ ====================
+async def publish_to_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -723,123 +1153,422 @@ async def channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Нет данных")
         return
     
-    action = query.data.split("_")[1]
+    active_channels = [(k, v) for k, v in CHANNELS.items() if v["channel_id"]]
     
-    if action == "all":
-        # Публикация во все каналы
-        await query.message.edit_text("⏳ Публикую во все каналы...")
-        
-        success = 0
-        text = session.get("text", "")
-        photo_bytes = session.get("photo_bytes")
-        video_bytes = session.get("video_bytes")
-        is_video = session.get("type") == "video"
-        
-        lines = text.split('\n')
-        title = lines[0] if lines else ""
-        body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-        caption = format_caption(title, body)
-        
-        for key, channel in CHANNELS.items():
-            if not channel["channel_id"]:
-                continue
-            try:
-                if is_video and video_bytes:
-                    if caption:
-                        await context.bot.send_video(
-                            chat_id=channel["channel_id"],
-                            video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                            caption=caption,
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await context.bot.send_video(
-                            chat_id=channel["channel_id"],
-                            video=InputFile(io.BytesIO(video_bytes), filename="video.mp4")
-                        )
-                elif photo_bytes:
-                    if caption:
-                        await context.bot.send_photo(
-                            chat_id=channel["channel_id"],
-                            photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                            caption=caption,
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await context.bot.send_photo(
-                            chat_id=channel["channel_id"],
-                            photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
-                        )
-                else:
-                    await context.bot.send_message(
-                        chat_id=channel["channel_id"],
-                        text=caption if caption else "."
-                    )
-                success += 1
-            except Exception as e:
-                print(f"Ошибка {channel['name']}: {e}")
-        
-        await query.message.edit_text(f"✅ Опубликовано в {success} каналов!")
+    if not active_channels:
+        await query.message.reply_text("❌ Нет настроенных каналов")
+        return
+    
+    await query.message.reply_text(f"⏳ Публикую во все {len(active_channels)} каналов...")
+    
+    text = session.get("text", "")
+    photo_bytes = session.get("photo_bytes")
+    video_bytes = session.get("video_bytes")
+    is_video = session.get("type") == "video"
+    
+    success = 0
+    errors = []
+    
+    for channel_key, channel_info in active_channels:
+        try:
+            await publish_to_single_channel(
+                context.bot,
+                channel_info["channel_id"],
+                text,
+                photo_bytes,
+                video_bytes,
+                is_video
+            )
+            success += 1
+            print(f"✅ Опубликовано в {channel_info['name']}")
+        except Exception as e:
+            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
+            print(f"❌ Ошибка в {channel_info['name']}: {e}")
+    
+    report = f"✅ *Результат*\n\n📊 Успешно: {success}/{len(active_channels)}"
+    if errors:
+        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
+    
+    await query.message.edit_text(report, parse_mode="Markdown")
+    
+    if success == len(active_channels):
         user_sessions.pop(user_id, None)
-        
+
+async def publish_to_all_channels_from_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await publish_to_all_channels_callback(update, context)
+
+async def publish_video_to_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await publish_to_all_channels_callback(update, context)
+
+# ==================== ВЫБОР КАНАЛОВ ====================
+async def select_channels_for_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных для публикации")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "user_id": user_id,
+        "text": session.get("text", ""),
+        "photo_bytes": session.get("photo_bytes"),
+        "video_bytes": session.get("video_bytes"),
+        "is_video": session.get("type") == "video",
+        "selected_channels": []
+    }
+    
+    await query.message.edit_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, "designed")
+    )
+
+async def select_channels_from_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных для публикации")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "user_id": user_id,
+        "text": session.get("text", ""),
+        "photo_bytes": session.get("photo_bytes"),
+        "video_bytes": session.get("video_bytes"),
+        "is_video": session.get("type") == "video",
+        "selected_channels": []
+    }
+    
+    await query.message.edit_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, "ai")
+    )
+
+async def select_channels_for_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных для публикации")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "user_id": user_id,
+        "text": session.get("text", ""),
+        "photo_bytes": session.get("photo_bytes"),
+        "video_bytes": session.get("video_bytes"),
+        "is_video": True,
+        "selected_channels": []
+    }
+    
+    await query.message.edit_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, "video")
+    )
+
+async def start_multi_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных для публикации")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "user_id": user_id,
+        "text": session.get("text", ""),
+        "photo_bytes": session.get("photo_bytes"),
+        "video_bytes": session.get("video_bytes"),
+        "is_video": session.get("type") == "video",
+        "selected_channels": []
+    }
+    
+    await query.message.edit_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, "post")
+    )
+
+async def start_multi_channel_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_multi_channel_callback(update, context)
+
+async def toggle_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, channel_key, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected = post_data["selected_channels"]
+    
+    if channel_key in selected:
+        selected.remove(channel_key)
     else:
-        # Публикация в один канал
-        channel = CHANNELS.get(action)
-        if not channel or not channel["channel_id"]:
-            await query.message.reply_text("❌ Канал не настроен")
+        if CHANNELS.get(channel_key, {}).get("channel_id"):
+            selected.append(channel_key)
+        else:
+            await query.answer("⚠️ Этот канал не настроен!", show_alert=True)
             return
-        
-        await query.message.edit_text(f"⏳ Публикую в {channel['name']}...")
+    
+    channels_text = "\n".join([f"{'✅' if ch in selected else '⬜'} {CHANNELS[ch]['name']}" for ch in CHANNELS if CHANNELS[ch]["channel_id"]])
+    
+    await query.message.edit_text(
+        f"🌍 *Выберите каналы*\n\n{channels_text}\n\n"
+        f"Выбрано: {len(selected)} каналов",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, source)
+    )
+
+async def publish_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    await query.message.edit_text(f"⏳ Публикую в {len(selected_channels)} каналов...")
+    
+    success = 0
+    errors = []
+    
+    for channel_key in selected_channels:
+        channel_info = CHANNELS.get(channel_key)
+        if not channel_info or not channel_info["channel_id"]:
+            errors.append(f"{channel_key}: не настроен")
+            continue
         
         try:
-            text = session.get("text", "")
-            photo_bytes = session.get("photo_bytes")
-            video_bytes = session.get("video_bytes")
-            is_video = session.get("type") == "video"
-            
-            lines = text.split('\n')
-            title = lines[0] if lines else ""
-            body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-            caption = format_caption(title, body)
-            
-            if is_video and video_bytes:
-                if caption:
-                    await context.bot.send_video(
-                        chat_id=channel["channel_id"],
-                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                        caption=caption,
-                        parse_mode="HTML"
-                    )
-                else:
-                    await context.bot.send_video(
-                        chat_id=channel["channel_id"],
-                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4")
-                    )
-            elif photo_bytes:
-                if caption:
-                    await context.bot.send_photo(
-                        chat_id=channel["channel_id"],
-                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                        caption=caption,
-                        parse_mode="HTML"
-                    )
-                else:
-                    await context.bot.send_photo(
-                        chat_id=channel["channel_id"],
-                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
-                    )
-            else:
-                await context.bot.send_message(
-                    chat_id=channel["channel_id"],
-                    text=caption if caption else "."
-                )
-            
-            await query.message.edit_text(f"✅ Опубликовано в {channel['name']}!")
-            user_sessions.pop(user_id, None)
+            await publish_to_single_channel(
+                context.bot,
+                channel_info["channel_id"],
+                post_data["text"],
+                post_data.get("photo_bytes"),
+                post_data.get("video_bytes"),
+                post_data.get("is_video", False)
+            )
+            success += 1
         except Exception as e:
-            await query.message.edit_text(f"❌ Ошибка: {e}")
+            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
+    
+    report = f"✅ *Результат*\n\n📊 Успешно: {success}/{len(selected_channels)}"
+    if errors:
+        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
+    
+    await query.message.edit_text(report, parse_mode="Markdown")
+    
+    user_id = post_data.get("user_id")
+    if user_id and success == len(selected_channels):
+        user_sessions.pop(user_id, None)
+    
+    multi_channel_posts.pop(post_id, None)
 
-async def schedule_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def publish_all_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    all_channels = [k for k, v in CHANNELS.items() if v["channel_id"]]
+    post_data["selected_channels"] = all_channels
+    
+    await query.message.edit_text(f"⏳ Публикую во все {len(all_channels)} каналов...")
+    
+    success = 0
+    errors = []
+    
+    for channel_key in all_channels:
+        channel_info = CHANNELS.get(channel_key)
+        try:
+            await publish_to_single_channel(
+                context.bot,
+                channel_info["channel_id"],
+                post_data["text"],
+                post_data.get("photo_bytes"),
+                post_data.get("video_bytes"),
+                post_data.get("is_video", False)
+            )
+            success += 1
+        except Exception as e:
+            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
+    
+    report = f"✅ *Результат*\n\n📊 Успешно: {success}/{len(all_channels)}"
+    if errors:
+        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
+    
+    await query.message.edit_text(report, parse_mode="Markdown")
+    
+    user_id = post_data.get("user_id")
+    if user_id and success == len(all_channels):
+        user_sessions.pop(user_id, None)
+    
+    multi_channel_posts.pop(post_id, None)
+
+async def schedule_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    context.user_data["scheduled_post_id"] = post_id
+    
+    schedule_times = [
+        ("Через 30 мин", "30min"),
+        ("9:05", "9:05"), ("10:05", "10:05"), ("11:05", "11:05"),
+        ("12:05", "12:05"), ("13:05", "13:05"), ("14:05", "14:05"),
+        ("15:05", "15:05"), ("16:05", "16:05"), ("17:05", "17:05"),
+        ("18:05", "18:05"), ("19:05", "19:05"), ("20:05", "20:05"),
+        ("21:05", "21:05"), ("22:05", "22:05")
+    ]
+    
+    keyboard = []
+    row = []
+    for label, value in schedule_times:
+        row.append(InlineKeyboardButton(label, callback_data=f"schedule_multi_time:{value}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_channels:{post_id}:{source}")])
+    
+    await query.message.edit_text(
+        "⏰ *Выберите время для отложенной публикации*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def schedule_multi_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    time_value = query.data.split(":")[1]
+    post_id = context.user_data.get("scheduled_post_id")
+    
+    if not post_id:
+        await query.message.reply_text("❌ Ошибка")
+        return
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = publish_time.strftime("%H:%M (%d.%m)")
+    
+    save_scheduled_multi_post(
+        post_data["text"],
+        post_data.get("photo_bytes"),
+        selected_channels,
+        publish_time
+    )
+    
+    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected_channels])
+    
+    await query.message.edit_text(
+        f"✅ *Пост запланирован!*\n\n"
+        f"📅 Время: {time_str}\n"
+        f"📢 Каналы:\n{channels_text}\n\n"
+        f"Пост будет автоматически опубликован.",
+        parse_mode="Markdown"
+    )
+    
+    multi_channel_posts.pop(post_id, None)
+    context.user_data.pop("scheduled_post_id", None)
+
+async def back_to_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected = post_data.get("selected_channels", [])
+    channels_text = "\n".join([f"{'✅' if ch in selected else '⬜'} {CHANNELS[ch]['name']}" for ch in CHANNELS if CHANNELS[ch]["channel_id"]])
+    
+    await query.message.edit_text(
+        f"🌍 *Выберите каналы*\n\n{channels_text}\n\n"
+        f"Выбрано: {len(selected)} каналов",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, source)
+    )
+
+# ==================== ОТЛОЖЕННАЯ ПУБЛИКАЦИЯ ====================
+async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.message.edit_reply_markup(reply_markup=get_schedule_keyboard())
@@ -868,69 +1597,162 @@ async def schedule_time_callback(update: Update, context: ContextTypes.DEFAULT_T
             publish_time += timedelta(days=1)
         time_str = publish_time.strftime("%H:%M (%d.%m)")
     
-    is_video = session.get("type") == "video"
+    save_scheduled_post(
+        session.get("text", ""),
+        session.get("photo_bytes"),
+        publish_time
+    )
     
-    if is_video:
-        save_scheduled_video(
-            session.get("text", ""),
-            session.get("video_bytes"),
-            CHANNEL_ID,
-            publish_time
-        )
-    else:
-        save_scheduled_post(
-            session.get("text", ""),
-            session.get("photo_bytes"),
-            CHANNEL_ID,
-            publish_time
-        )
+    await query.message.reply_text(
+        f"✅ Пост запланирован на {time_str}\n\n"
+        f"Он будет автоматически опубликован в основной канал."
+    )
     
-    await query.message.reply_text(f"✅ Пост запланирован на {time_str}")
     user_sessions.pop(user_id, None)
+    
     try:
         await query.message.delete()
     except:
         pass
 
-async def back_to_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def schedule_video_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_reply_markup(reply_markup=get_video_schedule_keyboard())
+
+async def schedule_video_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     session = user_sessions.get(user_id)
     
-    if session:
+    if not session:
+        await query.message.reply_text("❌ Нет данных")
+        return
+    
+    time_value = query.data.split(":")[1]
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = publish_time.strftime("%H:%M (%d.%m)")
+    
+    save_scheduled_video(
+        session.get("text", ""),
+        session.get("video_bytes"),
+        publish_time
+    )
+    
+    await query.message.reply_text(
+        f"✅ Видео запланировано на {time_str}\n\n"
+        f"Оно будет автоматически опубликовано в основной канал."
+    )
+    
+    user_sessions.pop(user_id, None)
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+async def schedule_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_reply_markup(reply_markup=get_schedule_keyboard())
+    context.user_data["scheduling_designed"] = True
+
+async def schedule_designed_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных")
+        return
+    
+    time_value = query.data.split(":")[1]
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = publish_time.strftime("%H:%M (%d.%m)")
+    
+    save_scheduled_post(
+        session.get("text", ""),
+        session.get("photo_bytes"),
+        publish_time
+    )
+    
+    await query.message.reply_text(
+        f"✅ Оформленный пост запланирован на {time_str}\n\n"
+        f"Он будет автоматически опубликован в основной канал."
+    )
+    
+    user_sessions.pop(user_id, None)
+    context.user_data["scheduling_designed"] = False
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+# ==================== НАВИГАЦИЯ ====================
+async def back_to_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if session and session.get("photo_bytes"):
         text = session.get("text", "")
         photo_bytes = session.get("photo_bytes")
         
-        if photo_bytes:
-            await query.message.reply_photo(
-                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                caption=text if text else "Пост",
-                reply_markup=get_post_keyboard()
-            )
-        else:
-            await query.message.reply_text(
-                text if text else "Пост",
-                reply_markup=get_post_keyboard()
-            )
+        await query.message.reply_photo(
+            photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+            caption=text if text else "Пост",
+            reply_markup=get_post_preview_keyboard()
+        )
         try:
             await query.message.delete()
         except:
             pass
 
-async def handle_text_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("editing"):
-        user_id = update.message.from_user.id
-        session = user_sessions.get(user_id)
-        if session:
-            session["text"] = update.message.text
-            await update.message.reply_text("✅ Текст обновлён!", reply_markup=get_post_keyboard())
-        context.user_data["editing"] = False
-
-async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["editing"] = False
-    await update.message.reply_text("✅ Отменено")
+async def back_to_video_preview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if session and session.get("video_bytes"):
+        text = session.get("text", "")
+        video_bytes = session.get("video_bytes")
+        
+        await query.message.reply_video(
+            video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+            caption=text if text else "Видео",
+            reply_markup=get_video_keyboard()
+        )
+        try:
+            await query.message.delete()
+        except:
+            pass
 
 # ==================== ПАРСИНГ НОВОСТЕЙ ====================
 async def start_parsing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -939,17 +1761,21 @@ async def start_parsing_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     await query.edit_message_text("⏳ Парсинг новостей...")
     
-    news_items = await fetch_news_from_csv(5)
+    news_items = await fetch_news_from_csv(10)
     if not news_items:
-        await query.message.reply_text("❌ Не загрузились новости", reply_markup=get_main_keyboard())
+        await query.message.reply_text("❌ Не удалось загрузить новости", reply_markup=get_main_keyboard())
         return
     
-    for item in news_items:
+    pending_news.clear()
+    
+    for i, item in enumerate(news_items):
         if is_already_published(item['url']):
             continue
         
         image_bytes = await fetch_article_image(item['url'])
         article_text = await fetch_article_text(item['url'])
+        
+        news_id = f"{i}_{abs(hash(item['url']))}"
         
         caption = f"📰 *{item['title']}*\n\n{article_text[:500]}...\n\n🔗 [Читать]({item['url']})"
         
@@ -958,17 +1784,16 @@ async def start_parsing_callback(update: Update, context: ContextTypes.DEFAULT_T
                 photo=InputFile(io.BytesIO(image_bytes), filename="news.jpg"),
                 caption=caption,
                 parse_mode="Markdown",
-                reply_markup=get_news_keyboard(f"{hash(item['url'])}")
+                reply_markup=get_news_keyboard(news_id)
             )
         else:
             await query.message.reply_text(
                 caption,
                 parse_mode="Markdown",
-                reply_markup=get_news_keyboard(f"{hash(item['url'])}")
+                reply_markup=get_news_keyboard(news_id)
             )
         
-        save_published(item['url'], item['title'])
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
     
     await query.message.reply_text("✅ Готово!", reply_markup=get_main_keyboard())
 
@@ -976,12 +1801,54 @@ async def publish_news_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
-    # Просто публикуем последнюю новость (упрощенно)
-    await query.message.reply_text("✅ Опубликовано в основной канал!")
+    news_id = query.data.split(":")[1]
+    news = pending_news.get(news_id)
+    
+    if not news:
+        await query.message.reply_text("❌ Новость не найдена")
+        return
+    
+    try:
+        news_text = news['text']
+        if len(news_text) > 1000:
+            news_text = news_text[:1000] + "..."
+        
+        caption = format_caption(news['title'], f"{news_text}\n\n🔗 {news['url']}")
+        
+        if news.get('photo'):
+            await context.bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=InputFile(io.BytesIO(news['photo']), filename="news.jpg"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=get_post_publish_keyboard()
+            )
+        
+        save_published(news['url'], news['title'])
+        await query.message.reply_text("✅ Опубликовано!")
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
 
 async def skip_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    news_id = query.data.split(":")[1]
+    pending_news.pop(news_id, None)
+    
     try:
         await query.message.delete()
     except:
@@ -991,12 +1858,11 @@ async def skip_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def check_scheduled_posts(app: Application):
     while True:
         try:
-            # Посты
+            # Обычные посты
             posts = get_pending_scheduled_posts()
             for post in posts:
                 text = post["text"]
                 photo_bytes = post["photo_bytes"]
-                channel_id = post["channel_id"]
                 
                 lines = text.split('\n')
                 title = lines[0] if lines else ""
@@ -1005,15 +1871,17 @@ async def check_scheduled_posts(app: Application):
                 
                 if caption:
                     await app.bot.send_photo(
-                        chat_id=channel_id,
+                        chat_id=CHANNEL_ID,
                         photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                         caption=caption,
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
                     )
                 else:
                     await app.bot.send_photo(
-                        chat_id=channel_id,
-                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
+                        chat_id=CHANNEL_ID,
+                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                        reply_markup=get_post_publish_keyboard()
                     )
                 
                 delete_scheduled_post(post["id"])
@@ -1024,7 +1892,6 @@ async def check_scheduled_posts(app: Application):
             for video in videos:
                 text = video["text"]
                 video_bytes = video["video_bytes"]
-                channel_id = video["channel_id"]
                 
                 lines = text.split('\n')
                 title = lines[0] if lines else ""
@@ -1033,22 +1900,64 @@ async def check_scheduled_posts(app: Application):
                 
                 if caption:
                     await app.bot.send_video(
-                        chat_id=channel_id,
+                        chat_id=CHANNEL_ID,
                         video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                         caption=caption,
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=get_post_publish_keyboard()
                     )
                 else:
                     await app.bot.send_video(
-                        chat_id=channel_id,
-                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4")
+                        chat_id=CHANNEL_ID,
+                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                        reply_markup=get_post_publish_keyboard()
                     )
                 
                 delete_scheduled_video(video["id"])
                 print(f"✅ Опубликовано отложенное видео")
+            
+            # Мультиканальные посты
+            multi_posts = get_pending_scheduled_multi_posts()
+            for post in multi_posts:
+                text = post["text"]
+                photo_bytes = post["photo_bytes"]
+                channels = post["channels"]
+                
+                lines = text.split('\n')
+                title = lines[0] if lines else ""
+                body = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                caption = format_caption(title, body)
+                
+                success_count = 0
+                for channel_key in channels:
+                    channel_info = CHANNELS.get(channel_key)
+                    if not channel_info or not channel_info["channel_id"]:
+                        continue
+                    
+                    try:
+                        if caption:
+                            await app.bot.send_photo(
+                                chat_id=channel_info["channel_id"],
+                                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                                caption=caption,
+                                parse_mode="HTML"
+                            )
+                        else:
+                            await app.bot.send_photo(
+                                chat_id=channel_info["channel_id"],
+                                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg")
+                            )
+                        success_count += 1
+                        print(f"✅ Опубликован отложенный пост в {channel_info['name']}")
+                    except Exception as e:
+                        print(f"❌ Ошибка в {channel_info['name']}: {e}")
+                
+                print(f"📊 Мультиканальный пост: успешно {success_count}/{len(channels)}")
+                delete_scheduled_multi_post(post["id"])
                 
         except Exception as e:
-            print(f"❌ Ошибка планировщика: {e}")
+            print(f"❌ Ошибка в планировщике: {e}")
+        
         await asyncio.sleep(60)
 
 # ==================== ВЕБ-СЕРВЕР ====================
@@ -1056,7 +1965,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "ok", "bot": "Grodno News Bot with Multi-Channel Support"}
 
 @app.get("/health")
 async def health():
@@ -1070,28 +1979,79 @@ async def run_bot():
     await bot.delete_webhook()
     print("✅ Webhook удалён")
     
+    if deepseek_client:
+        print("✅ DeepSeek API подключен")
+    else:
+        print("⚠️ DeepSeek API не настроен")
+    
+    active = sum(1 for ch in CHANNELS.values() if ch["channel_id"])
+    print(f"✅ Активных каналов: {active}")
+    
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel_edit))
     
+    # Обработчики сообщений
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_edit))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edited_text))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_request))
     
+    # Колбэки парсинга
     application.add_handler(CallbackQueryHandler(start_parsing_callback, pattern="start_parsing"))
     application.add_handler(CallbackQueryHandler(publish_news_callback, pattern="publish_news:"))
     application.add_handler(CallbackQueryHandler(skip_news_callback, pattern="skip_news:"))
     
+    # Оформление и редактирование
     application.add_handler(CallbackQueryHandler(design_post_callback, pattern="design_post"))
     application.add_handler(CallbackQueryHandler(edit_text_callback, pattern="edit_text"))
+    application.add_handler(CallbackQueryHandler(edit_video_text_callback, pattern="edit_video_text"))
+    application.add_handler(CallbackQueryHandler(edit_designed_text_callback, pattern="edit_designed_text"))
+    
+    # Обработка ИИ
     application.add_handler(CallbackQueryHandler(ai_process_callback, pattern="ai_process"))
-    application.add_handler(CallbackQueryHandler(publish_now_callback, pattern="publish_now"))
-    application.add_handler(CallbackQueryHandler(select_channel_callback, pattern="select_channel"))
-    application.add_handler(CallbackQueryHandler(schedule_post_callback, pattern="schedule_post"))
+    application.add_handler(CallbackQueryHandler(ai_process_video_callback, pattern="ai_process_video"))
+    application.add_handler(CallbackQueryHandler(ai_reprocess_callback, pattern="ai_reprocess"))
+    application.add_handler(CallbackQueryHandler(ai_reprocess_video_callback, pattern="ai_reprocess_video"))
+    
+    # Публикация
+    application.add_handler(CallbackQueryHandler(publish_raw_callback, pattern="publish_raw"))
+    application.add_handler(CallbackQueryHandler(publish_designed_callback, pattern="publish_designed"))
+    application.add_handler(CallbackQueryHandler(publish_video_callback, pattern="publish_video"))
+    
+    # Публикация во все каналы
+    application.add_handler(CallbackQueryHandler(publish_to_all_channels_callback, pattern="publish_to_all_channels"))
+    application.add_handler(CallbackQueryHandler(publish_to_all_channels_from_ai_callback, pattern="publish_to_all_channels_from_ai"))
+    application.add_handler(CallbackQueryHandler(publish_video_to_all_channels_callback, pattern="publish_video_to_all_channels"))
+    
+    # Выбор каналов
+    application.add_handler(CallbackQueryHandler(select_channels_for_designed_callback, pattern="select_channels_for_designed"))
+    application.add_handler(CallbackQueryHandler(select_channels_from_ai_callback, pattern="select_channels_from_ai"))
+    application.add_handler(CallbackQueryHandler(select_channels_for_video_callback, pattern="select_channels_for_video"))
+    application.add_handler(CallbackQueryHandler(start_multi_channel_callback, pattern="start_multi_channel"))
+    application.add_handler(CallbackQueryHandler(start_multi_channel_video_callback, pattern="start_multi_channel_video"))
+    
+    # Управление выбором каналов
+    application.add_handler(CallbackQueryHandler(toggle_channel_callback, pattern="toggle_channel:"))
+    application.add_handler(CallbackQueryHandler(publish_selected_callback, pattern="publish_selected:"))
+    application.add_handler(CallbackQueryHandler(publish_all_selected_callback, pattern="publish_all_selected:"))
+    application.add_handler(CallbackQueryHandler(schedule_selected_callback, pattern="schedule_selected:"))
+    application.add_handler(CallbackQueryHandler(schedule_multi_time_callback, pattern="schedule_multi_time:"))
+    application.add_handler(CallbackQueryHandler(back_to_channels_callback, pattern="back_to_channels:"))
+    
+    # Отложенная публикация
+    application.add_handler(CallbackQueryHandler(schedule_menu_callback, pattern="schedule_menu"))
+    application.add_handler(CallbackQueryHandler(schedule_video_menu_callback, pattern="schedule_video_menu"))
+    application.add_handler(CallbackQueryHandler(schedule_designed_callback, pattern="schedule_designed"))
     application.add_handler(CallbackQueryHandler(schedule_time_callback, pattern="schedule_time:"))
-    application.add_handler(CallbackQueryHandler(back_to_post_callback, pattern="back_to_post"))
-    application.add_handler(CallbackQueryHandler(channel_callback, pattern="^channel_"))
+    application.add_handler(CallbackQueryHandler(schedule_video_time_callback, pattern="schedule_video_time:"))
+    application.add_handler(CallbackQueryHandler(schedule_designed_time_callback, pattern="schedule_designed_time:"))
+    
+    # Навигация
+    application.add_handler(CallbackQueryHandler(back_to_preview_callback, pattern="back_to_preview"))
+    application.add_handler(CallbackQueryHandler(back_to_video_preview_callback, pattern="back_to_video_preview"))
     
     await application.initialize()
     await application.start()
@@ -1100,7 +2060,7 @@ async def run_bot():
     
     await application.updater.start_polling()
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен с полной функциональностью!")
 
 if __name__ == "__main__":
     import threading
