@@ -60,15 +60,17 @@ deepseek_client = AsyncOpenAI(
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
-# Промпт для DeepSeek
+# Промпт для DeepSeek с требованием расставлять абзацы
 DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
 
 Тебе нужно переделывать новость с большого объема в новость на 650 символов.
 Убирая всю лишнюю воду, текст, делать интересным заголовок, никаких смайликов. Сохраняй главные факты, проверяй всю информацию несколько раз, чтобы не было никаких ошибок.
 
+ОБЯЗАТЕЛЬНО расставляй абзацы в тексте, чтобы он не был сплошной кашей. Разбивай текст на логические абзацы по смыслу.
+
 Верни только готовую новость в формате:
 Заголовок: (заголовок новости)
-Текст: (текст новости на 650 символов)"""
+Текст: (текст новости на 650 символов с абзацами)"""
 
 # ==================== ФУНКЦИЯ START ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -771,10 +773,11 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
+        # Показываем ВЕСЬ текст полностью, без обрезания
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
-            f"📝 *Текст:*\n{body[:300]}...\n\n"
+            f"📝 *Текст:*\n{body}\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_ai_result_keyboard()
@@ -838,10 +841,11 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
+        # Показываем ВЕСЬ текст полностью, без обрезания
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
-            f"📝 *Текст:*\n{body[:300]}...\n\n"
+            f"📝 *Текст:*\n{body}\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_video_ai_result_keyboard()
@@ -1540,7 +1544,7 @@ async def back_to_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await query.message.reply_photo(
             photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-            caption=f"✅ *Текст обработан!*\n\n{text[:500]}...",
+            caption=f"✅ *Текст обработан!*\n\n{text}",
             parse_mode="Markdown",
             reply_markup=get_ai_result_keyboard()
         )
