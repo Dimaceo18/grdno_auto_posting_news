@@ -60,17 +60,20 @@ deepseek_client = AsyncOpenAI(
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
-# Промпт для DeepSeek с требованием расставлять абзацы
-DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
+# Промпт для DeepSeek - сохраняем объем текста, добавляем абзацы
+DEEPSEEK_PROMPT = """Ты редактор новостного сайта. Твоя задача - отформатировать текст новости, практически не меняя его содержание.
 
-Тебе нужно переделывать новость с большого объема в новость на 650 символов.
-Убирая всю лишнюю воду, текст, делать интересным заголовок, никаких смайликов. Сохраняй главные факты, проверяй всю информацию несколько раз, чтобы не было никаких ошибок.
-
-ОБЯЗАТЕЛЬНО расставляй абзацы в тексте, чтобы он не был сплошной кашей. Разбивай текст на логические абзацы по смыслу.
+Правила:
+1. НЕ УКОРАЧИВАЙ текст - сохрани его оригинальный объем
+2. Удали только смайлики, если они есть
+3. ОБЯЗАТЕЛЬНО расставь абзацы - разбей текст на логические части (3-5 предложений в абзаце)
+4. Заголовок сделай чуть более интересным, но не меняй смысл
+5. Сохрани все важные детали, даты, цифры, имена
 
 Верни только готовую новость в формате:
 Заголовок: (заголовок новости)
-Текст: (текст новости на 650 символов с абзацами)"""
+
+Текст: (текст новости с абзацами, оригинального объема)"""
 
 # ==================== ФУНКЦИЯ START ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -754,7 +757,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 {"role": "user", "content": text}
             ],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=2000
         )
         
         processed_text = response.choices[0].message.content
@@ -766,14 +769,24 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 title = line.replace("Заголовок:", "").strip()
             elif line.startswith("Текст:"):
                 body = line.replace("Текст:", "").strip()
+            elif line.startswith("**Заголовок:**"):
+                title = line.replace("**Заголовок:**", "").strip()
+            elif line.startswith("**Текст:**"):
+                body = line.replace("**Текст:**", "").strip()
         
         if not title and not body:
-            body = processed_text
+            # Если формат не соблюден, пробуем извлечь
+            parts = processed_text.split('\n\n', 1)
+            if len(parts) == 2:
+                title = parts[0].strip()
+                body = parts[1].strip()
+            else:
+                body = processed_text
         
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        # Показываем ВЕСЬ текст полностью, без обрезания
+        # Показываем весь текст полностью
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
@@ -822,7 +835,7 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
                 {"role": "user", "content": text}
             ],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=2000
         )
         
         processed_text = response.choices[0].message.content
@@ -834,14 +847,22 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
                 title = line.replace("Заголовок:", "").strip()
             elif line.startswith("Текст:"):
                 body = line.replace("Текст:", "").strip()
+            elif line.startswith("**Заголовок:**"):
+                title = line.replace("**Заголовок:**", "").strip()
+            elif line.startswith("**Текст:**"):
+                body = line.replace("**Текст:**", "").strip()
         
         if not title and not body:
-            body = processed_text
+            parts = processed_text.split('\n\n', 1)
+            if len(parts) == 2:
+                title = parts[0].strip()
+                body = parts[1].strip()
+            else:
+                body = processed_text
         
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        # Показываем ВЕСЬ текст полностью, без обрезания
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
@@ -1267,7 +1288,6 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         
         await query.message.edit_text(f"✅ Опубликовано в {channel_info['name']}!")
         
-        # Очищаем данные
         user_id = query.from_user.id
         user_sessions.pop(user_id, None)
         context.user_data.pop("temp_session", None)
@@ -1738,14 +1758,13 @@ async def run_bot():
     
     bot = Bot(token=BOT_TOKEN)
     
-    # ПРИНУДИТЕЛЬНО УДАЛЯЕМ ВЕБХУК
+    # Принудительно удаляем вебхук
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook удалён")
     except Exception as e:
         print(f"⚠️ Ошибка при удалении webhook: {e}")
     
-    # Даем время на удаление
     await asyncio.sleep(1)
     
     if deepseek_client:
@@ -1759,7 +1778,6 @@ async def run_bot():
         if ch["channel_id"]:
             print(f"   • {ch['name']}: {ch['channel_id']}")
     
-    # Создаем приложение с увеличенным таймаутом
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Команды
@@ -1826,7 +1844,7 @@ async def run_bot():
     
     asyncio.create_task(check_scheduled_posts(application))
     
-    # Запускаем polling с правильными параметрами
+    # Запускаем polling
     await application.updater.start_polling(
         allowed_updates=["message", "callback_query"],
         drop_pending_updates=True
