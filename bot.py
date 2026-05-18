@@ -27,11 +27,16 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 CSV_URL = "https://rss.app/feeds/eblnvNTLpd5syIbd.csv"
 DB_PATH = "news.db"
 
-# Каналы для публикации
+# Каналы для публикации (включая основной канал в список)
 CHANNELS = {
+    "main": {
+        "name": "Основной канал",
+        "channel_id": CHANNEL_ID,
+        "link": CHANNEL_LINK
+    },
     "grodno": {
         "name": "Фидер Гродно",
-        "channel_id": os.getenv("CHANNEL_ID_GRODNO", CHANNEL_ID),
+        "channel_id": os.getenv("CHANNEL_ID_GRODNO"),
         "link": os.getenv("CHANNEL_LINK_GRODNO", "https://t.me/grodno_news")
     },
     "baranovichi": {
@@ -60,20 +65,20 @@ deepseek_client = AsyncOpenAI(
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
-# Промпт для DeepSeek - сохраняем объем текста, добавляем абзацы
-DEEPSEEK_PROMPT = """Ты редактор новостного сайта. Твоя задача - отформатировать текст новости, практически не меняя его содержание.
+# Промпт для DeepSeek - строго 600-650 символов с абзацами
+DEEPSEEK_PROMPT = """Ты редактор новостного сайта. Твоя задача - сократить длинную новость до 600-650 символов (русских символов, пробелы считаются), ОБЯЗАТЕЛЬНО расставить абзацы, чтобы текст не был сплошной кашей.
 
 Правила:
-1. НЕ УКОРАЧИВАЙ текст - сохрани его оригинальный объем
-2. Удали только смайлики, если они есть
-3. ОБЯЗАТЕЛЬНО расставь абзацы - разбей текст на логические части (3-5 предложений в абзаце)
-4. Заголовок сделай чуть более интересным, но не меняй смысл
-5. Сохрани все важные детали, даты, цифры, имена
+1. ИТОГОВЫЙ ТЕКСТ ДОЛЖЕН БЫТЬ 600-650 СИМВОЛОВ (русских, вместе с пробелами)
+2. ОБЯЗАТЕЛЬНО разбей текст на 2-3 абзаца по смыслу
+3. Сохрани главные факты: кто, что, где, когда
+4. Сделай заголовок коротким и интересным (до 60 символов)
+5. Удали смайлики и воду
 
-Верни только готовую новость в формате:
-Заголовок: (заголовок новости)
+Верни только готовую новость строго в формате:
+Заголовок: (короткий заголовок до 60 символов)
 
-Текст: (текст новости с абзацами, оригинального объема)"""
+Текст: (текст на 600-650 символов с абзацами, где каждый абзац отделяется пустой строкой)"""
 
 # ==================== ФУНКЦИЯ START ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,6 +156,11 @@ def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[
     if current_line and len(lines) < max_lines:
         lines.append(' '.join(current_line))
     return lines
+
+def count_russian_chars(text: str) -> int:
+    """Подсчитывает количество русских символов и пробелов"""
+    russian_pattern = re.compile(r'[а-яА-ЯёЁ\s]')
+    return len(russian_pattern.findall(text))
 
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     if not photo_bytes or len(photo_bytes) == 0:
@@ -551,6 +561,14 @@ def get_video_schedule_keyboard():
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")])
     return InlineKeyboardMarkup(keyboard)
 
+def get_channel_list_keyboard(source: str = "post"):
+    keyboard = []
+    for key, channel in CHANNELS.items():
+        if channel["channel_id"]:
+            keyboard.append([InlineKeyboardButton(f"📢 {channel['name']}", callback_data=f"publish_to_channel:{key}:{source}")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_{source}")])
+    return InlineKeyboardMarkup(keyboard)
+
 def get_post_publish_keyboard():
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
@@ -559,7 +577,6 @@ def get_post_publish_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== ОБРАБОТЧИКИ ПОЛУЧЕНИЯ МЕДИА ====================
-# ==================== ОБРАБОТЧИКИ ПОЛУЧЕНИЯ МЕДИА (ИСПРАВЛЕННЫЕ) ====================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = message.from_user.id
@@ -594,8 +611,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(caption) > 900:
             await message.reply_text(
                 f"📝 *Текст поста:*\n\n{caption}",
-                parse_mode="Markdown",
-                reply_markup=get_post_preview_keyboard()
+                parse_mode="Markdown"
             )
         
     except Exception as e:
@@ -625,19 +641,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "video_bytes": video_bytes
         }
         
-        # Отправляем видео без подписи (или с короткой подписью)
         await message.reply_video(
             video=video.file_id,
             caption="✅ Видео получено!" if len(caption) > 900 else (f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!"),
             reply_markup=get_video_keyboard()
         )
         
-        # Если текст был длинным, отправляем его отдельным сообщением
         if len(caption) > 900:
             await message.reply_text(
                 f"📝 *Текст видео:*\n\n{caption}",
-                parse_mode="Markdown",
-                reply_markup=get_video_keyboard()
+                parse_mode="Markdown"
             )
         
     except Exception as e:
@@ -681,7 +694,6 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"✅ Текст обновлён!\n\n{new_text}",
                 reply_markup=get_post_preview_keyboard()
             )
-            # Если есть фото, показываем его отдельно
             if session.get("photo_bytes"):
                 await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
@@ -786,7 +798,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek (600-650 символов)...")
     
     try:
         response = await deepseek_client.chat.completions.create(
@@ -796,7 +808,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 {"role": "user", "content": text}
             ],
             temperature=0.7,
-            max_tokens=2000
+            max_tokens=1000
         )
         
         processed_text = response.choices[0].message.content
@@ -814,7 +826,6 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 body = line.replace("**Текст:**", "").strip()
         
         if not title and not body:
-            # Если формат не соблюден, пробуем извлечь
             parts = processed_text.split('\n\n', 1)
             if len(parts) == 2:
                 title = parts[0].strip()
@@ -825,11 +836,13 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        # Показываем весь текст полностью
+        # Подсчитываем количество символов
+        char_count = len(body)
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
             f"📝 *Текст:*\n{body}\n\n"
+            f"📊 *Длина текста:* {char_count} символов\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_ai_result_keyboard()
@@ -864,7 +877,7 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek (600-650 символов)...")
     
     try:
         response = await deepseek_client.chat.completions.create(
@@ -874,7 +887,7 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
                 {"role": "user", "content": text}
             ],
             temperature=0.7,
-            max_tokens=2000
+            max_tokens=1000
         )
         
         processed_text = response.choices[0].message.content
@@ -902,10 +915,12 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
+        char_count = len(body)
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
             f"📝 *Текст:*\n{body}\n\n"
+            f"📊 *Длина текста:* {char_count} символов\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_video_ai_result_keyboard()
@@ -1134,6 +1149,7 @@ async def publish_to_all_channels_callback(update: Update, context: ContextTypes
         await query.message.reply_text("❌ Нет данных")
         return
     
+    # Все активные каналы (включая основной)
     active_channels = [(k, v) for k, v in CHANNELS.items() if v["channel_id"]]
     
     if not active_channels:
@@ -1178,7 +1194,7 @@ async def publish_to_all_channels_callback(update: Update, context: ContextTypes
 async def publish_video_to_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await publish_to_all_channels_callback(update, context)
 
-# ==================== ВЫБОР КАНАЛА (ДЛЯ ВСЕХ РЕЖИМОВ) ====================
+# ==================== ВЫБОР КАНАЛА ====================
 async def select_channel_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1193,17 +1209,11 @@ async def select_channel_menu_callback(update: Update, context: ContextTypes.DEF
     context.user_data["temp_session"] = session
     context.user_data["temp_source"] = "post"
     
-    keyboard = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            keyboard.append([InlineKeyboardButton(f"📢 {channel['name']}", callback_data=f"publish_to_channel:{key}:post")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_post")])
-    
     await query.message.reply_text(
         "🌍 *Выберите канал для публикации*\n\n"
         "Нажмите на нужный канал, и пост будет опубликован туда.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_channel_list_keyboard("post")
     )
 
 async def select_channel_menu_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1220,17 +1230,11 @@ async def select_channel_menu_video_callback(update: Update, context: ContextTyp
     context.user_data["temp_session"] = session
     context.user_data["temp_source"] = "video"
     
-    keyboard = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            keyboard.append([InlineKeyboardButton(f"📢 {channel['name']}", callback_data=f"publish_to_channel:{key}:video")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")])
-    
     await query.message.reply_text(
         "🌍 *Выберите канал для публикации видео*\n\n"
         "Нажмите на нужный канал, и видео будет опубликовано туда.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_channel_list_keyboard("video")
     )
 
 async def select_channel_menu_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1247,17 +1251,11 @@ async def select_channel_menu_designed_callback(update: Update, context: Context
     context.user_data["temp_session"] = session
     context.user_data["temp_source"] = "designed"
     
-    keyboard = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            keyboard.append([InlineKeyboardButton(f"📢 {channel['name']}", callback_data=f"publish_to_channel:{key}:designed")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_designed")])
-    
     await query.message.reply_text(
         "🌍 *Выберите канал для публикации*\n\n"
         "Нажмите на нужный канал, и пост будет опубликован туда.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_channel_list_keyboard("designed")
     )
 
 async def select_channel_menu_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1274,17 +1272,11 @@ async def select_channel_menu_ai_callback(update: Update, context: ContextTypes.
     context.user_data["temp_session"] = session
     context.user_data["temp_source"] = "ai"
     
-    keyboard = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            keyboard.append([InlineKeyboardButton(f"📢 {channel['name']}", callback_data=f"publish_to_channel:{key}:ai")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_ai")])
-    
     await query.message.reply_text(
         "🌍 *Выберите канал для публикации*\n\n"
         "Нажмите на нужный канал, и пост будет опубликован туда.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_channel_list_keyboard("ai")
     )
 
 async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1797,7 +1789,6 @@ async def run_bot():
     
     bot = Bot(token=BOT_TOKEN)
     
-    # Принудительно удаляем вебхук
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook удалён")
@@ -1855,7 +1846,7 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(publish_to_all_channels_callback, pattern="publish_to_all_channels"))
     application.add_handler(CallbackQueryHandler(publish_video_to_all_channels_callback, pattern="publish_video_to_all_channels"))
     
-    # Выбор канала (для всех режимов)
+    # Выбор канала
     application.add_handler(CallbackQueryHandler(select_channel_menu_callback, pattern="select_channel_menu$"))
     application.add_handler(CallbackQueryHandler(select_channel_menu_video_callback, pattern="select_channel_menu_video"))
     application.add_handler(CallbackQueryHandler(select_channel_menu_designed_callback, pattern="select_channel_menu_designed"))
@@ -1883,7 +1874,6 @@ async def run_bot():
     
     asyncio.create_task(check_scheduled_posts(application))
     
-    # Запускаем polling
     await application.updater.start_polling(
         allowed_updates=["message", "callback_query"],
         drop_pending_updates=True
