@@ -559,6 +559,7 @@ def get_post_publish_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== ОБРАБОТЧИКИ ПОЛУЧЕНИЯ МЕДИА ====================
+# ==================== ОБРАБОТЧИКИ ПОЛУЧЕНИЯ МЕДИА (ИСПРАВЛЕННЫЕ) ====================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = message.from_user.id
@@ -582,11 +583,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "video_bytes": None
         }
         
+        # Отправляем фото без подписи (или с короткой подписью)
         await message.reply_photo(
             photo=photo.file_id,
-            caption=f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!",
+            caption="✅ Пост получен!" if len(caption) > 900 else (f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!"),
             reply_markup=get_post_preview_keyboard()
         )
+        
+        # Если текст был длинным, отправляем его отдельным сообщением
+        if len(caption) > 900:
+            await message.reply_text(
+                f"📝 *Текст поста:*\n\n{caption}",
+                parse_mode="Markdown",
+                reply_markup=get_post_preview_keyboard()
+            )
+        
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         await message.reply_text(f"❌ Ошибка загрузки фото: {e}")
@@ -614,11 +625,21 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "video_bytes": video_bytes
         }
         
+        # Отправляем видео без подписи (или с короткой подписью)
         await message.reply_video(
             video=video.file_id,
-            caption=f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!",
+            caption="✅ Видео получено!" if len(caption) > 900 else (f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!"),
             reply_markup=get_video_keyboard()
         )
+        
+        # Если текст был длинным, отправляем его отдельным сообщением
+        if len(caption) > 900:
+            await message.reply_text(
+                f"📝 *Текст видео:*\n\n{caption}",
+                parse_mode="Markdown",
+                reply_markup=get_video_keyboard()
+            )
+        
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         await message.reply_text(f"❌ Ошибка загрузки видео: {e}")
@@ -660,16 +681,34 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"✅ Текст обновлён!\n\n{new_text}",
                 reply_markup=get_post_preview_keyboard()
             )
+            # Если есть фото, показываем его отдельно
+            if session.get("photo_bytes"):
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                    caption="🖼️ *Фото к посту*",
+                    parse_mode="Markdown"
+                )
         elif edit_type == "video":
             await update.message.reply_text(
                 f"✅ Текст обновлён!\n\n{new_text}",
                 reply_markup=get_video_keyboard()
             )
+            if session.get("video_bytes"):
+                await update.message.reply_video(
+                    video=InputFile(io.BytesIO(session["video_bytes"]), filename="video.mp4"),
+                    caption="🎬 *Видео к посту*",
+                    parse_mode="Markdown"
+                )
         elif edit_type == "designed":
             if session.get("photo_bytes"):
                 await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
                     caption=f"{new_text}\n\n✅ Текст обновлён!",
+                    reply_markup=get_designed_post_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    f"{new_text}\n\n✅ Текст обновлён!",
                     reply_markup=get_designed_post_keyboard()
                 )
     
