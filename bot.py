@@ -65,25 +65,22 @@ deepseek_client = AsyncOpenAI(
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
-# Промпт для DeepSeek - строго 600-650 символов с абзацами
-DEEPSEEK_PROMPT = """Ты редактор новостного сайта. Перепиши текст в формате городской новости.
+# ИСПРАВЛЕННЫЙ ПРОМПТ ДЛЯ DEEPSEEK
+DEEPSEEK_PROMPT = """Ты профессиональный редактор новостного сайта. Твоя задача - ПЕРЕПИСАТЬ длинную новость, сохраняя все важные факты.
 
-ТРЕБОВАНИЯ:
-1. Длина текста: 600-650 символов (считая пробелы)
-2. Заголовок может быть любой длины - пиши как получается по смыслу
-3. Удали все смайлики, эмодзи, восклицательные знаки
-4. Удали фразы "подпишись", "читайте также", "переходите по ссылке", "в нашем телеграм-канале" и подобный спам
-5. Разбей текст на 2-3 абзаца (логически)
-6. Только сухие факты: что случилось, где, когда, кто участники
-7. НЕ используй обращений "вы", "ты", "друзья", "подписчики"
-8. Пиши нейтрально, как в новостях
+СТРОГИЕ ТРЕБОВАНИЯ:
+1. Длина текста ДОЛЖНА БЫТЬ от 600 до 650 символов (считая пробелы)
+2. НЕ ОБРЕЗАЙ текст - ПЕРЕПИШИ его, сохраняя смысл
+3. Сохрани ВСЕ важные факты: кто, что, где, когда, почему, сколько
+4. Удали только явную воду: "подпишись", "читайте также", смайлики
+5. Разбей текст на 2-3 логических абзаца
+6. Заголовок сделай коротким (40-60 символов)
 
-ФОРМАТ ОТВЕТА (строго):
+ФОРМАТ ОТВЕТА:
 Заголовок: (заголовок новости)
 
-Текст: (текст новости на 600-650 символов с абзацами)
+Текст: (текст новости на 600-650 символов с абзацами)"""
 
-Важно: НЕ пиши ничего кроме заголовка и текста. НЕ объясняй свои действия. Верни ТОЛЬКО новость."""
 # ==================== ФУНКЦИЯ START ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -94,7 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Доступные функции:*\n"
         "• 🎨 Оформление постов с текстом на фото\n"
         "• ✏️ Редактирование текста\n"
-        "• 🤖 Обработка текста через ИИ (DeepSeek)\n"
+        "• 🤖 Обработка текста через ИИ (DeepSeek) - переписывает в формат 600-650 символов\n"
         "• 🌍 Публикация в несколько каналов\n"
         "• ⏰ Отложенная публикация\n\n"
         "👇 *Нажмите кнопку*",
@@ -160,11 +157,6 @@ def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[
     if current_line and len(lines) < max_lines:
         lines.append(' '.join(current_line))
     return lines
-
-def count_russian_chars(text: str) -> int:
-    """Подсчитывает количество русских символов и пробелов"""
-    russian_pattern = re.compile(r'[а-яА-ЯёЁ\s]')
-    return len(russian_pattern.findall(text))
 
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     if not photo_bytes or len(photo_bytes) == 0:
@@ -604,14 +596,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "video_bytes": None
         }
         
-        # Отправляем фото без подписи (или с короткой подписью)
         await message.reply_photo(
             photo=photo.file_id,
             caption="✅ Пост получен!" if len(caption) > 900 else (f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!"),
             reply_markup=get_post_preview_keyboard()
         )
         
-        # Если текст был длинным, отправляем его отдельным сообщением
         if len(caption) > 900:
             await message.reply_text(
                 f"📝 *Текст поста:*\n\n{caption}",
@@ -781,6 +771,49 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка оформления: {e}")
 
+# ==================== ФУНКЦИЯ ЗАПРОСА К DEEPSEEK С ПРОВЕРКОЙ ДЛИНЫ ====================
+async def call_deepseek_with_retry(prompt, text, max_attempts=2):
+    """Вызов DeepSeek с повторной попыткой и корректировкой длины"""
+    
+    async def make_request(current_prompt, current_text):
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": current_prompt},
+                {"role": "user", "content": f"Перепиши эту новость в формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл.\n\n{current_text}"}
+            ],
+            temperature=0.7,
+            max_tokens=1200
+        )
+        return response.choices[0].message.content
+    
+    for attempt in range(max_attempts):
+        content = await make_request(prompt, text)
+        
+        # Извлекаем тело текста
+        body = ""
+        if "Текст:" in content:
+            body_match = re.search(r'Текст:\s*(.+?)$', content, re.IGNORECASE | re.DOTALL)
+            if body_match:
+                body = body_match.group(1).strip()
+        if not body:
+            lines = content.strip().split('\n')
+            body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else content.strip()
+        
+        char_count = len(body)
+        
+        # Если длина правильная или это последняя попытка
+        if 550 <= char_count <= 700 or attempt == max_attempts - 1:
+            return content
+        
+        # Если текст слишком короткий, просим увеличить
+        if char_count < 550:
+            text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 600-650). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
+        else:
+            text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 600-650). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
+    
+    return content
+
 # ==================== ОБРАБОТКА ИИ ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -802,32 +835,23 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek (600-650 символов)...")
+    await query.message.reply_text("🤖 Перерабатываю текст через DeepSeek AI (600-650 символов)...")
     
     try:
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": DEEPSEEK_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
+        processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
         
-        processed_text = response.choices[0].message.content
-        
+        # Парсим ответ
         title = ""
         body = ""
-        for line in processed_text.split('\n'):
-            if line.startswith("Заголовок:"):
-                title = line.replace("Заголовок:", "").strip()
-            elif line.startswith("Текст:"):
-                body = line.replace("Текст:", "").strip()
-            elif line.startswith("**Заголовок:**"):
-                title = line.replace("**Заголовок:**", "").strip()
-            elif line.startswith("**Текст:**"):
-                body = line.replace("**Текст:**", "").strip()
+        
+        if "Заголовок:" in processed_text or "ЗАГОЛОВОК:" in processed_text:
+            title_match = re.search(r'(?:Заголовок:|ЗАГОЛОВОК:)\s*(.+?)(?=(?:Текст:|ТЕКСТ:|$))', processed_text, re.IGNORECASE | re.DOTALL)
+            if title_match:
+                title = title_match.group(1).strip()
+            
+            body_match = re.search(r'(?:Текст:|ТЕКСТ:)\s*(.+?)$', processed_text, re.IGNORECASE | re.DOTALL)
+            if body_match:
+                body = body_match.group(1).strip()
         
         if not title and not body:
             parts = processed_text.split('\n\n', 1)
@@ -837,16 +861,34 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 body = processed_text
         
-        new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
+        if len(title) > 100:
+            title = title[:97] + "..."
+        
+        if not body:
+            body = processed_text
+        
+        body = re.sub(r'^Текст:\s*', '', body, flags=re.IGNORECASE)
+        body = body.strip()
+        
+        char_count = len(body)
+        
+        new_text = f"{title}\n\n{body}" if title else body
         session["text"] = new_text
         
-        # Подсчитываем количество символов
-        char_count = len(body)
+        if 600 <= char_count <= 650:
+            status = "✅ Отлично!"
+        elif 550 <= char_count < 600:
+            status = "⚠️ Немного коротковат (нужно 600-650)"
+        elif 650 < char_count <= 700:
+            status = "⚠️ Немного длинноват (нужно 600-650)"
+        else:
+            status = f"⚠️ Не соответствует (нужно 600-650)"
+        
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
             f"📝 *Текст:*\n{body}\n\n"
-            f"📊 *Длина текста:* {char_count} символов\n\n"
+            f"📊 *Длина текста:* {char_count} символов {status}\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_ai_result_keyboard()
@@ -859,7 +901,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
-        await query.message.reply_text(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка при обработке: {e}")
 
 async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -881,32 +923,22 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek (600-650 символов)...")
+    await query.message.reply_text("🤖 Перерабатываю текст через DeepSeek AI (600-650 символов)...")
     
     try:
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": DEEPSEEK_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        processed_text = response.choices[0].message.content
+        processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
         
         title = ""
         body = ""
-        for line in processed_text.split('\n'):
-            if line.startswith("Заголовок:"):
-                title = line.replace("Заголовок:", "").strip()
-            elif line.startswith("Текст:"):
-                body = line.replace("Текст:", "").strip()
-            elif line.startswith("**Заголовок:**"):
-                title = line.replace("**Заголовок:**", "").strip()
-            elif line.startswith("**Текст:**"):
-                body = line.replace("**Текст:**", "").strip()
+        
+        if "Заголовок:" in processed_text or "ЗАГОЛОВОК:" in processed_text:
+            title_match = re.search(r'(?:Заголовок:|ЗАГОЛОВОК:)\s*(.+?)(?=(?:Текст:|ТЕКСТ:|$))', processed_text, re.IGNORECASE | re.DOTALL)
+            if title_match:
+                title = title_match.group(1).strip()
+            
+            body_match = re.search(r'(?:Текст:|ТЕКСТ:)\s*(.+?)$', processed_text, re.IGNORECASE | re.DOTALL)
+            if body_match:
+                body = body_match.group(1).strip()
         
         if not title and not body:
             parts = processed_text.split('\n\n', 1)
@@ -916,15 +948,34 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
             else:
                 body = processed_text
         
-        new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
-        session["text"] = new_text
+        if len(title) > 100:
+            title = title[:97] + "..."
+        
+        if not body:
+            body = processed_text
+        
+        body = re.sub(r'^Текст:\s*', '', body, flags=re.IGNORECASE)
+        body = body.strip()
         
         char_count = len(body)
+        
+        new_text = f"{title}\n\n{body}" if title else body
+        session["text"] = new_text
+        
+        if 600 <= char_count <= 650:
+            status = "✅ Отлично!"
+        elif 550 <= char_count < 600:
+            status = "⚠️ Немного коротковат (нужно 600-650)"
+        elif 650 < char_count <= 700:
+            status = "⚠️ Немного длинноват (нужно 600-650)"
+        else:
+            status = f"⚠️ Не соответствует (нужно 600-650)"
+        
         await query.message.reply_text(
             f"✅ *Текст обработан!*\n\n"
             f"📰 *Заголовок:* {title}\n\n"
             f"📝 *Текст:*\n{body}\n\n"
-            f"📊 *Длина текста:* {char_count} символов\n\n"
+            f"📊 *Длина текста:* {char_count} символов {status}\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_video_ai_result_keyboard()
@@ -947,8 +998,9 @@ async def ai_reprocess_callback(update: Update, context: ContextTypes.DEFAULT_TY
         "📝 *Введите ваш запрос для переделки текста*\n\n"
         "Примеры:\n"
         "• Сделай заголовок броским\n"
-        "• Сократи до 400 символов\n"
-        "• Сделай более официальным\n\n"
+        "• Сделай текст 650 символов\n"
+        "• Сделай более официальным\n"
+        "• Добавь больше фактов и цифр\n\n"
         "Или /cancel для отмены.",
         parse_mode="Markdown"
     )
@@ -963,7 +1015,7 @@ async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFA
         "📝 *Введите ваш запрос для переделки текста видео*\n\n"
         "Примеры:\n"
         "• Сделай заголовок броским\n"
-        "• Сократи до 400 символов\n"
+        "• Сделай текст 650 символов\n"
         "• Сделай более официальным\n\n"
         "Или /cancel для отмены.",
         parse_mode="Markdown"
@@ -1153,7 +1205,6 @@ async def publish_to_all_channels_callback(update: Update, context: ContextTypes
         await query.message.reply_text("❌ Нет данных")
         return
     
-    # Все активные каналы (включая основной)
     active_channels = [(k, v) for k, v in CHANNELS.items() if v["channel_id"]]
     
     if not active_channels:
@@ -1803,6 +1854,7 @@ async def run_bot():
     
     if deepseek_client:
         print("✅ DeepSeek API подключен")
+        print("📏 Текст будет перерабатываться в формат 600-650 символов")
     else:
         print("⚠️ DeepSeek API не настроен")
     
