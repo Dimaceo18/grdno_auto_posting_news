@@ -1211,7 +1211,8 @@ async def publish_to_all_channels_callback(update: Update, context: ContextTypes
         await query.message.reply_text("❌ Нет настроенных каналов")
         return
     
-    await query.message.reply_text(f"⏳ Публикую во все {len(active_channels)} каналов...")
+    # Отправляем новое сообщение о статусе (НЕ редактируем исходное)
+    status_msg = await query.message.reply_text(f"⏳ Публикую во все {len(active_channels)} каналов...")
     
     text = session.get("text", "")
     photo_bytes = session.get("photo_bytes")
@@ -1241,7 +1242,7 @@ async def publish_to_all_channels_callback(update: Update, context: ContextTypes
     if errors:
         report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
     
-    await query.message.edit_text(report, parse_mode="Markdown")
+    await status_msg.edit_text(report, parse_mode="Markdown")
     
     if success == len(active_channels):
         user_sessions.pop(user_id, None)
@@ -1264,12 +1265,19 @@ async def select_channel_menu_callback(update: Update, context: ContextTypes.DEF
     context.user_data["temp_session"] = session
     context.user_data["temp_source"] = "post"
     
+    # Отправляем новое сообщение со списком каналов
     await query.message.reply_text(
         "🌍 *Выберите канал для публикации*\n\n"
         "Нажмите на нужный канал, и пост будет опубликован туда.",
         parse_mode="Markdown",
         reply_markup=get_channel_list_keyboard("post")
     )
+    
+    # Удаляем исходное сообщение
+    try:
+        await query.message.delete()
+    except:
+        pass
 
 async def select_channel_menu_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1291,6 +1299,11 @@ async def select_channel_menu_video_callback(update: Update, context: ContextTyp
         parse_mode="Markdown",
         reply_markup=get_channel_list_keyboard("video")
     )
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
 
 async def select_channel_menu_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1312,6 +1325,11 @@ async def select_channel_menu_designed_callback(update: Update, context: Context
         parse_mode="Markdown",
         reply_markup=get_channel_list_keyboard("designed")
     )
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
 
 async def select_channel_menu_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1333,6 +1351,11 @@ async def select_channel_menu_ai_callback(update: Update, context: ContextTypes.
         parse_mode="Markdown",
         reply_markup=get_channel_list_keyboard("ai")
     )
+    
+    try:
+        await query.message.delete()
+    except:
+        pass
 
 async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1355,7 +1378,8 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         await query.message.reply_text("❌ Канал не настроен")
         return
     
-    await query.message.edit_text(f"⏳ Публикую в {channel_info['name']}...")
+    # Отправляем новое сообщение о статусе
+    status_msg = await query.message.reply_text(f"⏳ Публикую в {channel_info['name']}...")
     
     try:
         text = session.get("text", "")
@@ -1372,15 +1396,21 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
             is_video
         )
         
-        await query.message.edit_text(f"✅ Опубликовано в {channel_info['name']}!")
+        await status_msg.edit_text(f"✅ Опубликовано в {channel_info['name']}!")
         
         user_id = query.from_user.id
         user_sessions.pop(user_id, None)
         context.user_data.pop("temp_session", None)
         context.user_data.pop("temp_source", None)
         
+        # Удаляем сообщение с выбором каналов
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
     except Exception as e:
-        await query.message.edit_text(f"❌ Ошибка: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
 
 # ==================== ОТЛОЖЕННАЯ ПУБЛИКАЦИЯ ====================
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
