@@ -1014,7 +1014,6 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         request = update.message.text
         context.user_data["waiting_for_ai_request"] = False
         await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
-        # Создаем фейковый query для вызова ai_process_callback
         class FakeQuery:
             def __init__(self, message, from_user):
                 self.message = message
@@ -1870,13 +1869,29 @@ async def run_bot():
     
     bot = Bot(token=BOT_TOKEN)
     
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook удалён")
-    except Exception as e:
-        print(f"⚠️ Ошибка при удалении webhook: {e}")
+    # Принудительно удаляем вебхук
+    for i in range(3):
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            print(f"✅ Webhook удалён (попытка {i+1})")
+            break
+        except Exception as e:
+            print(f"⚠️ Ошибка при удалении webhook (попытка {i+1}): {e}")
+            await asyncio.sleep(1)
     
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
+    
+    # Проверяем, удалился ли вебхук
+    try:
+        webhook_info = await bot.get_webhook_info()
+        if webhook_info.url:
+            print(f"⚠️ Вебхук всё ещё активен: {webhook_info.url}")
+            await bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(1)
+        else:
+            print("✅ Вебхук успешно удалён")
+    except Exception as e:
+        print(f"⚠️ Не удалось проверить вебхук: {e}")
     
     if deepseek_client:
         print("✅ DeepSeek API подключен")
@@ -1956,12 +1971,16 @@ async def run_bot():
     
     asyncio.create_task(check_scheduled_posts(application))
     
+    # Запускаем polling
     await application.updater.start_polling(
         allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True
+        drop_pending_updates=True,
+        poll_interval=1.0,
+        timeout=30
     )
     
     print("✅ Бот запущен!")
+
 
 if __name__ == "__main__":
     import threading
