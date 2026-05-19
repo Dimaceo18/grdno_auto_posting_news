@@ -2,13 +2,11 @@
 
 import os
 import io
-import threading
 import logging
 import re
 import asyncio
 import httpx
 
-from flask import Flask
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,18 +32,6 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 if not BOT_TOKEN:
     raise RuntimeError("Нет BOT_TOKEN")
 
-web_app = Flask(__name__)
-
-@web_app.get("/")
-def health():
-    return "OK", 200
-
-
-def run_web():
-    port = int(os.getenv("PORT", "10000"))
-    web_app.run(host="0.0.0.0", port=port)
-
-
 W, H = 1080, 1920
 
 PURPLE = (111, 55, 245)
@@ -59,7 +45,7 @@ DIVIDER_PATH = "divider.png"
 # Высота плашки-разделителя в пикселях
 DIVIDER_HEIGHT = 50
 
-# ИСПРАВЛЕННЫЙ ПРОМПТ ДЛЯ DEEPSEEK
+# ПРОМПТ ДЛЯ DEEPSEEK
 DEEPSEEK_PROMPT = """Ты профессиональный редактор новостного сайта. Твоя задача - ПЕРЕПИСАТЬ длинную новость в короткий новостной формат, сохраняя все важные факты.
 
 СТРОГИЕ ТРЕБОВАНИЯ:
@@ -277,28 +263,6 @@ def create_story(photo_bytes, title, body):
 
 
 # ==================== ФУНКЦИЯ ЗАПРОСА К DeepSeek ====================
-async def call_deepseek(prompt, text):
-    """Вызов DeepSeek API"""
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": f"Перепиши эту новость в формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его.\n\n{text}"}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 1200
-            }
-        )
-        return response.json()
-
-
 async def call_deepseek_with_fix(prompt, text, original_text=None):
     """Вызов DeepSeek с автоматической корректировкой длины"""
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -470,8 +434,7 @@ async def ai_reprocess_callback(update: Update, context: ContextTypes.DEFAULT_TY
         "• Сделай заголовок броским\n"
         "• Сделай текст 650 символов\n"
         "• Сделай более официальным\n"
-        "• Добавь больше фактов и цифр\n"
-        "• Сохрани все даты и имена\n\n"
+        "• Добавь больше фактов и цифр\n\n"
         "Или отправьте /cancel для отмены.",
         parse_mode="Markdown"
     )
@@ -974,8 +937,6 @@ async def post_init(app):
 
 
 def main():
-    threading.Thread(target=run_web, daemon=True).start()
-
     app = (
         Application.builder()
         .token(BOT_TOKEN)
