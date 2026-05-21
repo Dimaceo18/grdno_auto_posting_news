@@ -542,6 +542,24 @@ def get_video_schedule_keyboard():
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_video_preview")])
     return InlineKeyboardMarkup(keyboard)
 
+def get_channel_selection_keyboard(post_id: str, source: str = "post"):
+    keyboard = []
+    for channel_key, channel_info in CHANNELS.items():
+        if channel_info["channel_id"]:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📢 {channel_info['name']}", 
+                    callback_data=f"toggle_channel:{post_id}:{channel_key}:{source}"
+                )
+            ])
+    keyboard.append([
+        InlineKeyboardButton("✅ Опубликовать в выбранные", callback_data=f"publish_selected:{post_id}:{source}"),
+        InlineKeyboardButton("⏰ Отложить в выбранные", callback_data=f"schedule_selected:{post_id}:{source}")
+    ])
+    keyboard.append([InlineKeyboardButton("🌍 Опубликовать во все", callback_data=f"publish_all_selected:{post_id}:{source}")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_channels:{post_id}:{source}")])
+    return InlineKeyboardMarkup(keyboard)
+
 def get_post_publish_keyboard():
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
@@ -785,6 +803,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
+        # Показываем результат
         if session.get("photo_file_id"):
             await query.message.reply_photo(
                 photo=session["photo_file_id"],
@@ -1118,444 +1137,6 @@ async def publish_to_single_channel(bot, channel_id, text, photo_bytes, video_by
             text=caption if caption else "."
         )
 
-# ==================== ВЫБОР КАНАЛОВ (ОСНОВНАЯ ЛОГИКА) ====================
-async def select_channels_for_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id)
-    
-    if not session:
-        await query.message.reply_text("❌ Нет данных для публикации")
-        return
-    
-    selection_id = str(uuid.uuid4())
-    
-    multi_channel_posts[selection_id] = {
-        "user_id": user_id,
-        "text": session.get("text", ""),
-        "photo_bytes": session.get("photo_bytes"),
-        "video_bytes": session.get("video_bytes"),
-        "is_video": session.get("type") == "video",
-        "selected_channels": [],
-        "source": "designed"
-    }
-    
-    await show_channel_selection(update, context, selection_id, "designed")
-
-async def select_channels_from_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id)
-    
-    if not session:
-        await query.message.reply_text("❌ Нет данных для публикации")
-        return
-    
-    selection_id = str(uuid.uuid4())
-    
-    multi_channel_posts[selection_id] = {
-        "user_id": user_id,
-        "text": session.get("text", ""),
-        "photo_bytes": session.get("photo_bytes"),
-        "video_bytes": session.get("video_bytes"),
-        "is_video": session.get("type") == "video",
-        "selected_channels": [],
-        "source": "ai"
-    }
-    
-    await show_channel_selection(update, context, selection_id, "ai")
-
-async def select_channels_for_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id)
-    
-    if not session:
-        await query.message.reply_text("❌ Нет данных для публикации")
-        return
-    
-    selection_id = str(uuid.uuid4())
-    
-    multi_channel_posts[selection_id] = {
-        "user_id": user_id,
-        "text": session.get("text", ""),
-        "photo_bytes": session.get("photo_bytes"),
-        "video_bytes": session.get("video_bytes"),
-        "is_video": True,
-        "selected_channels": [],
-        "source": "video"
-    }
-    
-    await show_channel_selection(update, context, selection_id, "video")
-
-async def start_multi_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id)
-    
-    if not session:
-        await query.message.reply_text("❌ Нет данных для публикации")
-        return
-    
-    selection_id = str(uuid.uuid4())
-    
-    multi_channel_posts[selection_id] = {
-        "user_id": user_id,
-        "text": session.get("text", ""),
-        "photo_bytes": session.get("photo_bytes"),
-        "video_bytes": session.get("video_bytes"),
-        "is_video": session.get("type") == "video",
-        "selected_channels": [],
-        "source": "post"
-    }
-    
-    await show_channel_selection(update, context, selection_id, "post")
-
-async def start_multi_channel_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_multi_channel_callback(update, context)
-
-async def show_channel_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, selection_id: str, source: str):
-    query = update.callback_query
-    
-    active_channels = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            active_channels.append((key, channel["name"]))
-    
-    if not active_channels:
-        await query.message.reply_text("❌ Нет настроенных каналов для публикации")
-        return
-    
-    keyboard = []
-    for key, name in active_channels:
-        keyboard.append([InlineKeyboardButton(f"⬜ {name}", callback_data=f"sel_channel:{selection_id}:{key}")])
-    
-    keyboard.append([InlineKeyboardButton("✅ Опубликовать в выбранные", callback_data=f"sel_publish:{selection_id}")])
-    keyboard.append([InlineKeyboardButton("🌍 Опубликовать во все", callback_data=f"sel_publish_all:{selection_id}")])
-    keyboard.append([InlineKeyboardButton("⏰ Отложить в выбранные", callback_data=f"sel_schedule:{selection_id}")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"sel_back:{source}")])
-    
-    await query.message.edit_text(
-        "🌍 *Выберите каналы для публикации*\n\n"
-        "Нажимайте на каналы, чтобы выбрать/отменить. ✅ - выбран, ⬜ - не выбран.\n\n"
-        "После выбора нажмите кнопку публикации.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def channel_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    _, selection_id, channel_key = query.data.split(":")
-    
-    post_data = multi_channel_posts.get(selection_id)
-    if not post_data:
-        await query.message.reply_text("❌ Данные не найдены")
-        return
-    
-    selected = post_data["selected_channels"]
-    
-    if channel_key in selected:
-        selected.remove(channel_key)
-    else:
-        selected.append(channel_key)
-    
-    active_channels = []
-    for key, channel in CHANNELS.items():
-        if channel["channel_id"]:
-            active_channels.append((key, channel["name"]))
-    
-    keyboard = []
-    for key, name in active_channels:
-        if key in selected:
-            keyboard.append([InlineKeyboardButton(f"✅ {name}", callback_data=f"sel_channel:{selection_id}:{key}")])
-        else:
-            keyboard.append([InlineKeyboardButton(f"⬜ {name}", callback_data=f"sel_channel:{selection_id}:{key}")])
-    
-    keyboard.append([InlineKeyboardButton("✅ Опубликовать в выбранные", callback_data=f"sel_publish:{selection_id}")])
-    keyboard.append([InlineKeyboardButton("🌍 Опубликовать во все", callback_data=f"sel_publish_all:{selection_id}")])
-    keyboard.append([InlineKeyboardButton("⏰ Отложить в выбранные", callback_data=f"sel_schedule:{selection_id}")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"sel_back:{post_data['source']}")])
-    
-    selected_count = len(selected)
-    channels_text = "\n".join([f"✅ {CHANNELS[ch]['name']}" for ch in selected]) if selected else "❌ Ничего не выбрано"
-    
-    await query.message.edit_text(
-        f"🌍 *Выберите каналы для публикации*\n\n"
-        f"*Выбрано ({selected_count}):*\n{channels_text}\n\n"
-        f"Нажимайте на каналы, чтобы выбрать/отменить.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def selection_publish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    selection_id = query.data.split(":")[1]
-    
-    post_data = multi_channel_posts.get(selection_id)
-    if not post_data:
-        await query.message.reply_text("❌ Данные не найдены")
-        return
-    
-    selected_channels = post_data.get("selected_channels", [])
-    if not selected_channels:
-        await query.message.reply_text("❌ Выберите хотя бы один канал")
-        return
-    
-    await query.message.edit_text(f"⏳ Публикую в {len(selected_channels)} каналов...")
-    
-    success = 0
-    errors = []
-    
-    for channel_key in selected_channels:
-        channel_info = CHANNELS.get(channel_key)
-        if not channel_info or not channel_info["channel_id"]:
-            errors.append(f"{channel_key}: не настроен")
-            continue
-        
-        try:
-            text = post_data["text"]
-            photo_bytes = post_data.get("photo_bytes")
-            video_bytes = post_data.get("video_bytes")
-            is_video = post_data.get("is_video", False)
-            
-            await publish_to_single_channel(
-                context.bot,
-                channel_info["channel_id"],
-                text,
-                photo_bytes,
-                video_bytes,
-                is_video
-            )
-            success += 1
-            print(f"✅ Опубликовано в {channel_info['name']}")
-        except Exception as e:
-            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
-            print(f"❌ Ошибка в {channel_info['name']}: {e}")
-    
-    report = f"✅ *Результат публикации*\n\n📊 Успешно: {success}/{len(selected_channels)}"
-    if errors:
-        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
-    
-    await query.message.edit_text(report, parse_mode="Markdown")
-    
-    user_id = post_data.get("user_id")
-    if user_id and success == len(selected_channels):
-        user_sessions.pop(user_id, None)
-    
-    multi_channel_posts.pop(selection_id, None)
-
-async def selection_publish_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    selection_id = query.data.split(":")[1]
-    
-    post_data = multi_channel_posts.get(selection_id)
-    if not post_data:
-        await query.message.reply_text("❌ Данные не найдены")
-        return
-    
-    all_channels = [k for k, v in CHANNELS.items() if v["channel_id"]]
-    
-    if not all_channels:
-        await query.message.reply_text("❌ Нет настроенных каналов")
-        return
-    
-    await query.message.edit_text(f"⏳ Публикую во все {len(all_channels)} каналов...")
-    
-    success = 0
-    errors = []
-    
-    for channel_key in all_channels:
-        channel_info = CHANNELS.get(channel_key)
-        try:
-            text = post_data["text"]
-            photo_bytes = post_data.get("photo_bytes")
-            video_bytes = post_data.get("video_bytes")
-            is_video = post_data.get("is_video", False)
-            
-            await publish_to_single_channel(
-                context.bot,
-                channel_info["channel_id"],
-                text,
-                photo_bytes,
-                video_bytes,
-                is_video
-            )
-            success += 1
-        except Exception as e:
-            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
-    
-    report = f"✅ *Результат публикации*\n\n📊 Успешно: {success}/{len(all_channels)}"
-    if errors:
-        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
-    
-    await query.message.edit_text(report, parse_mode="Markdown")
-    
-    user_id = post_data.get("user_id")
-    if user_id and success == len(all_channels):
-        user_sessions.pop(user_id, None)
-    
-    multi_channel_posts.pop(selection_id, None)
-
-async def selection_schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    selection_id = query.data.split(":")[1]
-    
-    post_data = multi_channel_posts.get(selection_id)
-    if not post_data:
-        await query.message.reply_text("❌ Данные не найдены")
-        return
-    
-    selected_channels = post_data.get("selected_channels", [])
-    if not selected_channels:
-        await query.message.reply_text("❌ Выберите хотя бы один канал")
-        return
-    
-    context.user_data["schedule_selection_id"] = selection_id
-    
-    schedule_times = [
-        ("Через 30 мин", "30min"),
-        ("9:05", "9:05"), ("10:05", "10:05"), ("11:05", "11:05"),
-        ("12:05", "12:05"), ("13:05", "13:05"), ("14:05", "14:05"),
-        ("15:05", "15:05"), ("16:05", "16:05"), ("17:05", "17:05"),
-        ("18:05", "18:05"), ("19:05", "19:05"), ("20:05", "20:05"),
-        ("21:05", "21:05"), ("22:05", "22:05")
-    ]
-    
-    keyboard = []
-    row = []
-    for label, value in schedule_times:
-        row.append(InlineKeyboardButton(label, callback_data=f"sel_schedule_time:{value}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"sel_back:{post_data['source']}")])
-    
-    await query.message.edit_text(
-        "⏰ *Выберите время для отложенной публикации*\n\n"
-        f"Будет опубликовано в {len(selected_channels)} каналов.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def selection_schedule_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    time_value = query.data.split(":")[1]
-    selection_id = context.user_data.get("schedule_selection_id")
-    
-    if not selection_id:
-        await query.message.reply_text("❌ Ошибка")
-        return
-    
-    post_data = multi_channel_posts.get(selection_id)
-    if not post_data:
-        await query.message.reply_text("❌ Данные не найдены")
-        return
-    
-    selected_channels = post_data.get("selected_channels", [])
-    
-    now = datetime.now()
-    if time_value == "30min":
-        publish_time = now + timedelta(minutes=30)
-        time_str = "через 30 минут"
-    else:
-        hour, minute = map(int, time_value.split(":"))
-        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if publish_time <= now:
-            publish_time += timedelta(days=1)
-        time_str = publish_time.strftime("%H:%M (%d.%m)")
-    
-    save_scheduled_multi_post(
-        post_data["text"],
-        post_data.get("photo_bytes"),
-        selected_channels,
-        publish_time
-    )
-    
-    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected_channels])
-    
-    await query.message.edit_text(
-        f"✅ *Пост запланирован!*\n\n"
-        f"📅 Время: {time_str}\n"
-        f"📢 Каналы:\n{channels_text}\n\n"
-        f"Пост будет автоматически опубликован в указанное время.",
-        parse_mode="Markdown"
-    )
-    
-    user_id = post_data.get("user_id")
-    if user_id:
-        user_sessions.pop(user_id, None)
-    
-    multi_channel_posts.pop(selection_id, None)
-    context.user_data.pop("schedule_selection_id", None)
-
-async def selection_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    source = query.data.split(":")[1]
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id)
-    
-    if not session:
-        await query.message.reply_text("❌ Нет данных")
-        return
-    
-    if source == "designed" or source == "ai":
-        text = session.get("text", "")
-        photo_bytes = session.get("photo_bytes")
-        
-        if photo_bytes:
-            await query.message.reply_photo(
-                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                caption=f"{text}\n\n✅ Пост оформлен!" if text else "Пост оформлен!",
-                reply_markup=get_designed_post_keyboard()
-            )
-    elif source == "video":
-        text = session.get("text", "")
-        video_bytes = session.get("video_bytes")
-        
-        if video_bytes:
-            await query.message.reply_video(
-                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                caption=text if text else "Видео",
-                reply_markup=get_video_keyboard()
-            )
-    else:
-        text = session.get("text", "")
-        photo_bytes = session.get("photo_bytes")
-        
-        if photo_bytes:
-            await query.message.reply_photo(
-                photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                caption=text if text else "Пост",
-                reply_markup=get_post_preview_keyboard()
-            )
-    
-    try:
-        await query.message.delete()
-    except:
-        pass
-
 async def publish_to_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1608,11 +1189,281 @@ async def publish_to_all_channels_callback(update: Update, context: ContextTypes
     if success == len(active_channels):
         user_sessions.pop(user_id, None)
 
-async def publish_to_all_channels_from_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await publish_to_all_channels_callback(update, context)
+async def start_multi_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных")
+        return
+    
+    post_id = str(uuid.uuid4())
+    
+    multi_channel_posts[post_id] = {
+        "user_id": user_id,
+        "text": session.get("text", ""),
+        "photo_bytes": session.get("photo_bytes"),
+        "video_bytes": session.get("video_bytes"),
+        "is_video": session.get("type") == "video",
+        "selected_channels": []
+    }
+    
+    await query.message.reply_text(
+        "🌍 *Выберите каналы для публикации*\n\n"
+        "Нажмите на канал чтобы выбрать/отменить.\n\n"
+        "После выбора нажмите кнопку публикации.",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, "multi")
+    )
 
-async def publish_video_to_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await publish_to_all_channels_callback(update, context)
+async def start_multi_channel_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_multi_channel_callback(update, context)
+
+async def toggle_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, channel_key, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected = post_data["selected_channels"]
+    
+    if channel_key in selected:
+        selected.remove(channel_key)
+    else:
+        if CHANNELS.get(channel_key, {}).get("channel_id"):
+            selected.append(channel_key)
+        else:
+            await query.answer("⚠️ Этот канал не настроен!", show_alert=True)
+            return
+    
+    channels_text = "\n".join([f"{'✅' if ch in selected else '⬜'} {CHANNELS[ch]['name']}" for ch in CHANNELS if CHANNELS[ch]["channel_id"]])
+    
+    await query.message.edit_text(
+        f"🌍 *Выберите каналы*\n\n{channels_text}\n\n"
+        f"Выбрано: {len(selected)} каналов",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, source)
+    )
+
+async def publish_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    await query.message.edit_text(f"⏳ Публикую в {len(selected_channels)} каналов...")
+    
+    success = 0
+    errors = []
+    
+    for channel_key in selected_channels:
+        channel_info = CHANNELS.get(channel_key)
+        if not channel_info or not channel_info["channel_id"]:
+            errors.append(f"{channel_key}: не настроен")
+            continue
+        
+        try:
+            await publish_to_single_channel(
+                context.bot,
+                channel_info["channel_id"],
+                post_data["text"],
+                post_data.get("photo_bytes"),
+                post_data.get("video_bytes"),
+                post_data.get("is_video", False)
+            )
+            success += 1
+        except Exception as e:
+            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
+    
+    report = f"✅ *Результат*\n\n📊 Успешно: {success}/{len(selected_channels)}"
+    if errors:
+        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
+    
+    await query.message.edit_text(report, parse_mode="Markdown")
+    
+    user_id = post_data.get("user_id")
+    if user_id and success == len(selected_channels):
+        user_sessions.pop(user_id, None)
+    
+    multi_channel_posts.pop(post_id, None)
+
+async def publish_all_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    all_channels = [k for k, v in CHANNELS.items() if v["channel_id"]]
+    post_data["selected_channels"] = all_channels
+    
+    await query.message.edit_text(f"⏳ Публикую во все {len(all_channels)} каналов...")
+    
+    success = 0
+    errors = []
+    
+    for channel_key in all_channels:
+        channel_info = CHANNELS.get(channel_key)
+        try:
+            await publish_to_single_channel(
+                context.bot,
+                channel_info["channel_id"],
+                post_data["text"],
+                post_data.get("photo_bytes"),
+                post_data.get("video_bytes"),
+                post_data.get("is_video", False)
+            )
+            success += 1
+        except Exception as e:
+            errors.append(f"{channel_info['name']}: {str(e)[:30]}")
+    
+    report = f"✅ *Результат*\n\n📊 Успешно: {success}/{len(all_channels)}"
+    if errors:
+        report += f"\n\n❌ Ошибки:\n" + "\n".join(f"• {e}" for e in errors)
+    
+    await query.message.edit_text(report, parse_mode="Markdown")
+    
+    user_id = post_data.get("user_id")
+    if user_id and success == len(all_channels):
+        user_sessions.pop(user_id, None)
+    
+    multi_channel_posts.pop(post_id, None)
+
+async def schedule_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    if not selected_channels:
+        await query.message.reply_text("❌ Выберите хотя бы один канал")
+        return
+    
+    context.user_data["scheduled_post_id"] = post_id
+    
+    schedule_times = [
+        ("Через 30 мин", "30min"),
+        ("9:05", "9:05"), ("10:05", "10:05"), ("11:05", "11:05"),
+        ("12:05", "12:05"), ("13:05", "13:05"), ("14:05", "14:05"),
+        ("15:05", "15:05"), ("16:05", "16:05"), ("17:05", "17:05"),
+        ("18:05", "18:05"), ("19:05", "19:05"), ("20:05", "20:05"),
+        ("21:05", "21:05"), ("22:05", "22:05")
+    ]
+    
+    keyboard = []
+    row = []
+    for label, value in schedule_times:
+        row.append(InlineKeyboardButton(label, callback_data=f"schedule_multi_time:{value}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"back_to_channels:{post_id}:{source}")])
+    
+    await query.message.edit_text(
+        "⏰ *Выберите время для отложенной публикации*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def schedule_multi_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    time_value = query.data.split(":")[1]
+    post_id = context.user_data.get("scheduled_post_id")
+    
+    if not post_id:
+        await query.message.reply_text("❌ Ошибка")
+        return
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected_channels = post_data.get("selected_channels", [])
+    
+    now = datetime.now()
+    if time_value == "30min":
+        publish_time = now + timedelta(minutes=30)
+        time_str = "через 30 минут"
+    else:
+        hour, minute = map(int, time_value.split(":"))
+        publish_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if publish_time <= now:
+            publish_time += timedelta(days=1)
+        time_str = publish_time.strftime("%H:%M (%d.%m)")
+    
+    save_scheduled_multi_post(
+        post_data["text"],
+        post_data.get("photo_bytes"),
+        selected_channels,
+        publish_time
+    )
+    
+    channels_text = "\n".join([f"• {CHANNELS[ch]['name']}" for ch in selected_channels])
+    
+    await query.message.edit_text(
+        f"✅ *Пост запланирован!*\n\n"
+        f"📅 Время: {time_str}\n"
+        f"📢 Каналы:\n{channels_text}\n\n"
+        f"Пост будет автоматически опубликован.",
+        parse_mode="Markdown"
+    )
+    
+    multi_channel_posts.pop(post_id, None)
+    context.user_data.pop("scheduled_post_id", None)
+
+async def back_to_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, post_id, source = query.data.split(":")
+    
+    post_data = multi_channel_posts.get(post_id)
+    if not post_data:
+        await query.message.reply_text("❌ Пост не найден")
+        return
+    
+    selected = post_data.get("selected_channels", [])
+    channels_text = "\n".join([f"{'✅' if ch in selected else '⬜'} {CHANNELS[ch]['name']}" for ch in CHANNELS if CHANNELS[ch]["channel_id"]])
+    
+    await query.message.edit_text(
+        f"🌍 *Выберите каналы*\n\n{channels_text}\n\n"
+        f"Выбрано: {len(selected)} каналов",
+        parse_mode="Markdown",
+        reply_markup=get_channel_selection_keyboard(post_id, source)
+    )
 
 # ==================== ОТЛОЖЕННАЯ ПУБЛИКАЦИЯ ====================
 async def schedule_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1801,6 +1652,21 @@ async def back_to_video_preview_callback(update: Update, context: ContextTypes.D
         except:
             pass
 
+async def select_channels_for_designed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_multi_channel_callback(update, context)
+
+async def select_channels_from_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_multi_channel_callback(update, context)
+
+async def select_channels_for_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_multi_channel_callback(update, context)
+
+async def publish_to_all_channels_from_ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await publish_to_all_channels_callback(update, context)
+
+async def publish_video_to_all_channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await publish_to_all_channels_callback(update, context)
+
 # ==================== ПАРСИНГ НОВОСТЕЙ ====================
 async def start_parsing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1922,6 +1788,7 @@ async def skip_news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def check_scheduled_posts(app: Application):
     while True:
         try:
+            # Обычные посты
             posts = get_pending_scheduled_posts()
             for post in posts:
                 text = post["text"]
@@ -1950,6 +1817,7 @@ async def check_scheduled_posts(app: Application):
                 delete_scheduled_post(post["id"])
                 print(f"✅ Опубликован отложенный пост")
             
+            # Видео
             videos = get_pending_scheduled_videos()
             for video in videos:
                 text = video["text"]
@@ -1978,6 +1846,7 @@ async def check_scheduled_posts(app: Application):
                 delete_scheduled_video(video["id"])
                 print(f"✅ Опубликовано отложенное видео")
             
+            # Мультиканальные посты
             multi_posts = get_pending_scheduled_multi_posts()
             for post in multi_posts:
                 text = post["text"]
@@ -2083,30 +1952,28 @@ async def run_bot():
     application.add_handler(CallbackQueryHandler(publish_to_all_channels_from_ai_callback, pattern="publish_to_all_channels_from_ai"))
     application.add_handler(CallbackQueryHandler(publish_video_to_all_channels_callback, pattern="publish_video_to_all_channels"))
     
-    # Обработчики выбора каналов
     application.add_handler(CallbackQueryHandler(select_channels_for_designed_callback, pattern="select_channels_for_designed"))
     application.add_handler(CallbackQueryHandler(select_channels_from_ai_callback, pattern="select_channels_from_ai"))
     application.add_handler(CallbackQueryHandler(select_channels_for_video_callback, pattern="select_channels_for_video"))
+    
     application.add_handler(CallbackQueryHandler(start_multi_channel_callback, pattern="start_multi_channel"))
     application.add_handler(CallbackQueryHandler(start_multi_channel_video_callback, pattern="start_multi_channel_video"))
     
-    # Обработчики выбора каналов (новые)
-    application.add_handler(CallbackQueryHandler(channel_selection_callback, pattern="sel_channel:"))
-    application.add_handler(CallbackQueryHandler(selection_publish_callback, pattern="sel_publish:"))
-    application.add_handler(CallbackQueryHandler(selection_publish_all_callback, pattern="sel_publish_all:"))
-    application.add_handler(CallbackQueryHandler(selection_schedule_callback, pattern="sel_schedule:"))
-    application.add_handler(CallbackQueryHandler(selection_schedule_time_callback, pattern="sel_schedule_time:"))
-    application.add_handler(CallbackQueryHandler(selection_back_callback, pattern="sel_back:"))
+    application.add_handler(CallbackQueryHandler(toggle_channel_callback, pattern="toggle_channel:"))
+    application.add_handler(CallbackQueryHandler(publish_selected_callback, pattern="publish_selected:"))
+    application.add_handler(CallbackQueryHandler(publish_all_selected_callback, pattern="publish_all_selected:"))
+    application.add_handler(CallbackQueryHandler(schedule_selected_callback, pattern="schedule_selected:"))
+    application.add_handler(CallbackQueryHandler(schedule_multi_time_callback, pattern="schedule_multi_time:"))
+    application.add_handler(CallbackQueryHandler(back_to_channels_callback, pattern="back_to_channels:"))
     
-    # Отложенная публикация
     application.add_handler(CallbackQueryHandler(schedule_menu_callback, pattern="schedule_menu"))
     application.add_handler(CallbackQueryHandler(schedule_video_menu_callback, pattern="schedule_video_menu"))
     application.add_handler(CallbackQueryHandler(schedule_designed_callback, pattern="schedule_designed"))
+    
     application.add_handler(CallbackQueryHandler(schedule_time_callback, pattern="schedule_time:"))
     application.add_handler(CallbackQueryHandler(schedule_video_time_callback, pattern="schedule_video_time:"))
     application.add_handler(CallbackQueryHandler(schedule_designed_time_callback, pattern="schedule_designed_time:"))
     
-    # Навигация
     application.add_handler(CallbackQueryHandler(back_to_preview_callback, pattern="back_to_preview"))
     application.add_handler(CallbackQueryHandler(back_to_video_preview_callback, pattern="back_to_video_preview"))
     
