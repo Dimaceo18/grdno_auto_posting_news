@@ -64,7 +64,7 @@ deepseek_client = AsyncOpenAI(
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
-# Промпт для DeepSeek - чистый вывод без маркеров
+# Промпт для DeepSeek
 DEEPSEEK_PROMPT = """Перепиши новость в формате на 600-650 символов.
 
 Правила:
@@ -589,7 +589,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "text": remove_emojis(caption),
             "photo_bytes": photo_bytes,
             "photo_file_id": photo.file_id,
-            "video_bytes": None
+            "video_bytes": None,
+            "original_text_for_reprocess": remove_emojis(caption)
         }
         
         await message.reply_photo(
@@ -626,7 +627,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "text": remove_emojis(caption),
             "photo_bytes": None,
             "video_bytes": video_bytes,
-            "video_file_id": video.file_id
+            "video_file_id": video.file_id,
+            "original_text_for_reprocess": remove_emojis(caption)
         }
         
         await message.reply_video(
@@ -675,6 +677,7 @@ async def handle_edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if session:
         session["text"] = new_text
+        session["original_text_for_reprocess"] = new_text
         
         if edit_type == "photo":
             await update.message.reply_text(
@@ -767,30 +770,47 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # ==================== ФУНКЦИЯ DEEPSEEK ====================
 async def call_deepseek_with_retry(prompt, text, max_attempts=2):
     async def make_request(current_prompt, current_text):
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": current_prompt},
-                {"role": "user", "content": f"Перепиши эту новость в формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        return response.choices[0].message.content
+        try:
+            response = await deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": current_prompt},
+                    {"role": "user", "content": f"Перепиши эту новость в формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Ошибка запроса к DeepSeek: {e}")
+            raise e
     
     for attempt in range(max_attempts):
-        content = await make_request(prompt, text)
-        char_count = len(content)
-        
-        if 550 <= char_count <= 700 or attempt == max_attempts - 1:
-            return content
-        
-        if char_count < 550:
-            text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 600-650). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
-        else:
-            text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 600-650). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
+        try:
+            content = await make_request(prompt, text)
+            
+            if not content or len(content.strip()) < 50:
+                print(f"Попытка {attempt + 1}: Получен пустой или слишком короткий ответ")
+                if attempt == max_attempts - 1:
+                    return content
+                continue
+            
+            char_count = len(content)
+            print(f"Попытка {attempt + 1}: Получен текст длиной {char_count} символов")
+            
+            if 550 <= char_count <= 700 or attempt == max_attempts - 1:
+                return content
+            
+            if char_count < 550:
+                text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 600-650). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
+            else:
+                text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 600-650). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
+        except Exception as e:
+            print(f"Ошибка при попытке {attempt + 1}: {e}")
+            if attempt == max_attempts - 1:
+                return ""
     
-    return content
+    return ""
 
 # ==================== ОБРАБОТКА ИИ ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -813,49 +833,70 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
+    # Сохраняем оригинальный текст для повторной обработки
+    if "original_text_for_reprocess" not in session:
+        session["original_text_for_reprocess"] = text
+    
     status_msg = await query.message.reply_text("🤖 Перерабатываю текст через DeepSeek AI (600-650 символов)...")
     
     try:
         processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
         
-        # Очищаем от маркеров
+        if not processed_text or len(processed_text.strip()) < 50:
+            await status_msg.edit_text("❌ DeepSeek вернул пустой ответ. Попробуйте ещё раз.")
+            return
+        
         processed_text = processed_text.strip()
         
-        # Удаляем строки с "Заголовок:" и "Текст:" если они есть
         lines = processed_text.split('\n')
         clean_lines = []
         for line in lines:
             line_clean = line.strip()
             if line_clean.lower().startswith("заголовок:") or line_clean.lower().startswith("текст:"):
-                # Пропускаем эти строки
                 continue
             clean_lines.append(line)
         
         processed_text = '\n'.join(clean_lines).strip()
         
-        # Разделяем на заголовок и тело
         parts = processed_text.split('\n\n', 1)
         if len(parts) == 2:
             title = parts[0].strip()
             body = parts[1].strip()
         else:
-            # Если нет пустой строки, пробуем разделить по первой строке
             first_newline = processed_text.find('\n')
             if first_newline != -1 and first_newline < 100:
                 title = processed_text[:first_newline].strip()
                 body = processed_text[first_newline:].strip()
             else:
-                title = processed_text[:70].strip()
-                body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+                if len(processed_text) < 200:
+                    title = processed_text[:70].strip()
+                    body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+                else:
+                    first_line = processed_text.split('\n')[0]
+                    if len(first_line) < 100:
+                        title = first_line
+                        body = '\n'.join(processed_text.split('\n')[1:]).strip()
+                    else:
+                        body = processed_text
         
-        # Очищаем от лишних символов
-        title = re.sub(r'^[#*\-_]+', '', title).strip()
-        body = re.sub(r'^[#*\-_]+', '', body).strip()
+        title = re.sub(r'^[#*\-_\s]+', '', title).strip()
+        body = re.sub(r'^[#*\-_\s]+', '', body).strip()
+        
+        if not title and body:
+            title = body[:70].strip()
+            body = body[70:].strip() if len(body) > 70 else body
+        
+        if not body and title:
+            body = title
+            title = ""
         
         char_count = len(body)
         
-        # Формируем итоговый текст
-        new_text = f"{title}\n\n{body}"
+        if title:
+            new_text = f"{title}\n\n{body}"
+        else:
+            new_text = body
+        
         session["text"] = new_text
         
         if 600 <= char_count <= 650:
@@ -920,10 +961,17 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
+    if "original_text_for_reprocess" not in session:
+        session["original_text_for_reprocess"] = text
+    
     status_msg = await query.message.reply_text("🤖 Перерабатываю текст через DeepSeek AI (600-650 символов)...")
     
     try:
         processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
+        
+        if not processed_text or len(processed_text.strip()) < 50:
+            await status_msg.edit_text("❌ DeepSeek вернул пустой ответ. Попробуйте ещё раз.")
+            return
         
         processed_text = processed_text.strip()
         
@@ -947,15 +995,35 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
                 title = processed_text[:first_newline].strip()
                 body = processed_text[first_newline:].strip()
             else:
-                title = processed_text[:70].strip()
-                body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+                if len(processed_text) < 200:
+                    title = processed_text[:70].strip()
+                    body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+                else:
+                    first_line = processed_text.split('\n')[0]
+                    if len(first_line) < 100:
+                        title = first_line
+                        body = '\n'.join(processed_text.split('\n')[1:]).strip()
+                    else:
+                        body = processed_text
         
-        title = re.sub(r'^[#*\-_]+', '', title).strip()
-        body = re.sub(r'^[#*\-_]+', '', body).strip()
+        title = re.sub(r'^[#*\-_\s]+', '', title).strip()
+        body = re.sub(r'^[#*\-_\s]+', '', body).strip()
+        
+        if not title and body:
+            title = body[:70].strip()
+            body = body[70:].strip() if len(body) > 70 else body
+        
+        if not body and title:
+            body = title
+            title = ""
         
         char_count = len(body)
         
-        new_text = f"{title}\n\n{body}"
+        if title:
+            new_text = f"{title}\n\n{body}"
+        else:
+            new_text = body
+        
         session["text"] = new_text
         
         if 600 <= char_count <= 650:
@@ -1004,36 +1072,221 @@ async def ai_reprocess_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных для обработки")
+        return
+    
+    original_text = session.get("original_text_for_reprocess", session.get("text", ""))
+    
     await query.message.reply_text(
-        "📝 *Введите ваш запрос для переделки текста*\n\n"
-        "Примеры:\n"
-        "• Сделай заголовок броским\n"
-        "• Сделай текст 650 символов\n"
-        "• Сделай более официальным\n\n"
-        "Или /cancel для отмены.",
+        "🤖 Отправляю повторный запрос к DeepSeek...\n\n"
+        "Требования:\n"
+        "• Длина текста: 700 символов\n"
+        "• Новостной формат\n"
+        "• Сохранить все важные факты\n"
+        "• Без смайликов и рекламы\n\n"
+        "Ожидайте...",
         parse_mode="Markdown"
     )
     
-    context.user_data["waiting_for_ai_request"] = True
+    try:
+        reprocess_prompt = """Перепиши эту новость в новостном формате на 700 символов.
+
+СТРОГИЕ ТРЕБОВАНИЯ:
+1. Длина текста ДОЛЖНА БЫТЬ 700 символов (считая пробелы)
+2. Сохрани ВСЕ важные факты из оригинального текста
+3. Разбей текст на 2-3 логических абзаца (пустая строка между абзацами)
+4. Удали смайлики, рекламу, обращения
+5. Заголовок сделай коротким и информативным
+
+ВАЖНО: НЕ пиши слова "Заголовок:" и "Текст:". Просто напиши сначала заголовок, потом пустую строку, потом текст.
+
+Верни только готовую новость."""
+        
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": reprocess_prompt},
+                {"role": "user", "content": f"Переделай этот текст в новость на 700 символов. Сохрани все важные факты:\n\n{original_text}"}
+            ],
+            temperature=0.7,
+            max_tokens=1200
+        )
+        
+        processed_text = response.choices[0].message.content
+        
+        processed_text = processed_text.strip()
+        
+        lines = processed_text.split('\n')
+        clean_lines = []
+        for line in lines:
+            line_clean = line.strip()
+            if line_clean.lower().startswith("заголовок:") or line_clean.lower().startswith("текст:"):
+                continue
+            clean_lines.append(line)
+        
+        processed_text = '\n'.join(clean_lines).strip()
+        
+        parts = processed_text.split('\n\n', 1)
+        if len(parts) == 2:
+            title = parts[0].strip()
+            body = parts[1].strip()
+        else:
+            first_newline = processed_text.find('\n')
+            if first_newline != -1 and first_newline < 100:
+                title = processed_text[:first_newline].strip()
+                body = processed_text[first_newline:].strip()
+            else:
+                title = processed_text[:70].strip()
+                body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+        
+        title = re.sub(r'^[#*\-_\s]+', '', title).strip()
+        body = re.sub(r'^[#*\-_\s]+', '', body).strip()
+        
+        char_count = len(body)
+        
+        new_text = f"{title}\n\n{body}"
+        session["text"] = new_text
+        session["original_text_for_reprocess"] = original_text
+        
+        await query.message.reply_text(
+            f"✅ *Текст переделан!*\n\n"
+            f"📰 *{title}*\n\n"
+            f"📝 {body}\n\n"
+            f"📊 *Длина текста:* {char_count} символов (цель: 700)\n\n"
+            f"Выберите действие:",
+            parse_mode="Markdown",
+            reply_markup=get_ai_result_keyboard()
+        )
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка при переделке: {e}")
 
 async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session:
+        await query.message.reply_text("❌ Нет данных для обработки")
+        return
+    
+    original_text = session.get("original_text_for_reprocess", session.get("text", ""))
+    
     await query.message.reply_text(
-        "📝 *Введите ваш запрос для переделки текста видео*\n\n"
-        "Примеры:\n"
-        "• Сделай заголовок броским\n"
-        "• Сделай текст 650 символов\n"
-        "• Сделай более официальным\n\n"
-        "Или /cancel для отмены.",
+        "🤖 Отправляю повторный запрос к DeepSeek...\n\n"
+        "Требования:\n"
+        "• Длина текста: 700 символов\n"
+        "• Новостной формат\n"
+        "• Сохранить все важные факты\n"
+        "• Без смайликов и рекламы\n\n"
+        "Ожидайте...",
         parse_mode="Markdown"
     )
     
-    context.user_data["waiting_for_ai_request_video"] = True
+    try:
+        reprocess_prompt = """Перепиши эту новость в новостном формате на 700 символов.
+
+СТРОГИЕ ТРЕБОВАНИЯ:
+1. Длина текста ДОЛЖНА БЫТЬ 700 символов (считая пробелы)
+2. Сохрани ВСЕ важные факты из оригинального текста
+3. Разбей текст на 2-3 логических абзаца (пустая строка между абзацами)
+4. Удали смайлики, рекламу, обращения
+5. Заголовок сделай коротким и информативным
+
+ВАЖНО: НЕ пиши слова "Заголовок:" и "Текст:". Просто напиши сначала заголовок, потом пустую строку, потом текст.
+
+Верни только готовую новость."""
+        
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": reprocess_prompt},
+                {"role": "user", "content": f"Переделай этот текст в новость на 700 символов. Сохрани все важные факты:\n\n{original_text}"}
+            ],
+            temperature=0.7,
+            max_tokens=1200
+        )
+        
+        processed_text = response.choices[0].message.content
+        
+        processed_text = processed_text.strip()
+        
+        lines = processed_text.split('\n')
+        clean_lines = []
+        for line in lines:
+            line_clean = line.strip()
+            if line_clean.lower().startswith("заголовок:") or line_clean.lower().startswith("текст:"):
+                continue
+            clean_lines.append(line)
+        
+        processed_text = '\n'.join(clean_lines).strip()
+        
+        parts = processed_text.split('\n\n', 1)
+        if len(parts) == 2:
+            title = parts[0].strip()
+            body = parts[1].strip()
+        else:
+            first_newline = processed_text.find('\n')
+            if first_newline != -1 and first_newline < 100:
+                title = processed_text[:first_newline].strip()
+                body = processed_text[first_newline:].strip()
+            else:
+                title = processed_text[:70].strip()
+                body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+        
+        title = re.sub(r'^[#*\-_\s]+', '', title).strip()
+        body = re.sub(r'^[#*\-_\s]+', '', body).strip()
+        
+        char_count = len(body)
+        
+        new_text = f"{title}\n\n{body}"
+        session["text"] = new_text
+        session["original_text_for_reprocess"] = original_text
+        
+        if session.get("video_file_id"):
+            await query.message.reply_video(
+                video=session["video_file_id"],
+                caption=f"✅ *Текст переделан!*\n\n"
+                        f"📰 *{title}*\n\n"
+                        f"📝 {body}\n\n"
+                        f"📊 *Длина текста:* {char_count} символов (цель: 700)\n\n"
+                        f"Выберите действие:",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
+        else:
+            await query.message.reply_text(
+                f"✅ *Текст переделан!*\n\n"
+                f"📰 *{title}*\n\n"
+                f"📝 {body}\n\n"
+                f"📊 *Длина текста:* {char_count} символов (цель: 700)\n\n"
+                f"Выберите действие:",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка при переделке: {e}")
 
 async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не callback ли это
     if update.callback_query:
         return
     
@@ -1041,7 +1294,6 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         request = update.message.text
         context.user_data["waiting_for_ai_request"] = False
         await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
-        # Создаем фейковый query
         class FakeQuery:
             def __init__(self, message, from_user):
                 self.message = message
@@ -1050,7 +1302,7 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         fake_query = FakeQuery(update.message, update.message.from_user)
         update.callback_query = fake_query
-        await ai_process_callback(update, context)
+        await ai_reprocess_callback(update, context)
         return
     
     if context.user_data.get("waiting_for_ai_request_video"):
@@ -1065,7 +1317,7 @@ async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         fake_query = FakeQuery(update.message, update.message.from_user)
         update.callback_query = fake_query
-        await ai_process_video_callback(update, context)
+        await ai_reprocess_video_callback(update, context)
         return
 
 # ==================== ПУБЛИКАЦИЯ ====================
