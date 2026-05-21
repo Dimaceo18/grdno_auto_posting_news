@@ -65,19 +65,15 @@ pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
 # Промпт для DeepSeek
-DEEPSEEK_PROMPT = """Ты профессиональный редактор новостного сайта. Твоя задача - ПЕРЕПИСАТЬ длинную новость, сохраняя все важные факты.
+DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
 
-СТРОГИЕ ТРЕБОВАНИЯ:
-1. Длина текста ДОЛЖНА БЫТЬ от 600 до 650 символов (считая пробелы)
-2. НЕ ОБРЕЗАЙ текст - ПЕРЕПИШИ его, сохраняя смысл
-3. Сохрани ВСЕ важные факты: кто, что, где, когда, почему, сколько
-4. Удали только явную воду: "подпишись", "читайте также", смайлики
-5. Разбей текст на 2-3 логических абзаца
-6. Заголовок сделай коротким (40-60 символов)
+Тебе нужно переделывать новость с большого объема в новость на 600-650 символов.
+Убирая всю лишнюю воду, текст, делать интересным заголовок, никаких смайликов. Сохраняй главные факты, проверяй всю информацию несколько раз, чтобы не было никаких ошибок.
 
-ФОРМАТ ОТВЕТА:
+Текст должен быть разбит на логические абзацы (2-3 абзаца). Между абзацами пустая строка.
+
+Верни только готовую новость в формате:
 Заголовок: (заголовок новости)
-
 Текст: (текст новости на 600-650 символов с абзацами)"""
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -809,7 +805,7 @@ async def call_deepseek_with_retry(prompt, text, max_attempts=2):
     
     return content
 
-# ==================== ОБРАБОТКА ИИ ====================
+# ==================== ОБРАБОТКА ИИ (ПРАВИЛЬНАЯ ВЕРСИЯ ИЗ ПЕРВОГО БОТА) ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -830,66 +826,50 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    status_msg = await query.message.reply_text("🤖 Перерабатываю текст через DeepSeek AI (600-650 символов)...")
+    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
     
     try:
-        processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": DEEPSEEK_PROMPT},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        processed_text = response.choices[0].message.content
         
         title = ""
         body = ""
-        
-        if "Заголовок:" in processed_text or "ЗАГОЛОВОК:" in processed_text:
-            title_match = re.search(r'(?:Заголовок:|ЗАГОЛОВОК:)\s*(.+?)(?=(?:Текст:|ТЕКСТ:|$))', processed_text, re.IGNORECASE | re.DOTALL)
-            if title_match:
-                title = title_match.group(1).strip()
-            
-            body_match = re.search(r'(?:Текст:|ТЕКСТ:)\s*(.+?)$', processed_text, re.IGNORECASE | re.DOTALL)
-            if body_match:
-                body = body_match.group(1).strip()
+        for line in processed_text.split('\n'):
+            if line.startswith("Заголовок:"):
+                title = line.replace("Заголовок:", "").strip()
+            elif line.startswith("Текст:"):
+                body = line.replace("Текст:", "").strip()
         
         if not title and not body:
-            parts = processed_text.split('\n\n', 1)
-            if len(parts) == 2:
-                title = parts[0].strip()
-                body = parts[1].strip()
-            else:
-                body = processed_text
-        
-        if len(title) > 100:
-            title = title[:97] + "..."
-        
-        if not body:
             body = processed_text
         
-        body = re.sub(r'^Текст:\s*', '', body, flags=re.IGNORECASE)
-        body = body.strip()
-        
-        char_count = len(body)
-        
-        new_text = f"{title}\n\n{body}" if title else body
+        new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
         session["text"] = new_text
         
-        if 600 <= char_count <= 650:
-            status = "✅ Отлично!"
-        elif 550 <= char_count < 600:
-            status = "⚠️ Немного коротковат (нужно 600-650)"
-        elif 650 < char_count <= 700:
-            status = "⚠️ Немного длинноват (нужно 600-650)"
-        else:
-            status = f"⚠️ Не соответствует (нужно 600-650)"
-        
-        await status_msg.delete()
-        
-        # Показываем ВЕСЬ текст, без обрезания
-        await query.message.reply_text(
-            f"✅ *Текст обработан!*\n\n"
-            f"📰 *Заголовок:* {title}\n\n"
-            f"📝 *Текст:*\n{body}\n\n"
-            f"📊 *Длина текста:* {char_count} символов {status}\n\n"
-            f"Выберите действие:",
-            parse_mode="Markdown",
-            reply_markup=get_ai_result_keyboard()
-        )
+        # Показываем результат
+        if session.get("photo_file_id"):
+            await query.message.reply_photo(
+                photo=session["photo_file_id"],
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_ai_result_keyboard()
+            )
+        elif session.get("photo_bytes"):
+            await query.message.reply_photo(
+                photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
+                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                parse_mode="Markdown",
+                reply_markup=get_ai_result_keyboard()
+            )
         
         try:
             await query.message.delete()
@@ -898,7 +878,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        await query.message.reply_text(f"❌ Ошибка: {e}")
 
 async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
