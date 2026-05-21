@@ -64,17 +64,23 @@ deepseek_client = AsyncOpenAI(
 pending_news: Dict[str, Dict] = {}
 user_sessions: Dict[int, Dict] = {}
 
-# Промпт для DeepSeek
-DEEPSEEK_PROMPT = """Ты редактор новостного сайта, у тебя строгий новостной городской формат. Без обращений на вы, ты и т.д. Только новостной формат.
+# Промпт для DeepSeek - чистый вывод без маркеров
+DEEPSEEK_PROMPT = """Перепиши новость в формате на 600-650 символов.
 
-Тебе нужно переделывать новость с большого объема в новость на 600-650 символов.
-Убирая всю лишнюю воду, текст, делать интересным заголовок, никаких смайликов. Сохраняй главные факты, проверяй всю информацию несколько раз, чтобы не было никаких ошибок.
+Правила:
+- Удали смайлики и рекламу
+- Разбей на 2-3 абзаца (пустая строка между абзацами)
+- Сохрани главные факты
+- Заголовок короткий и информативный
 
-Текст должен быть разбит на логические абзацы (2-3 абзаца). Между абзацами пустая строка.
+ВАЖНО: НЕ пиши слова "Заголовок:" и "Текст:". Просто напиши сначала заголовок, потом пустую строку, потом текст.
 
-Верни только готовую новость в формате:
-Заголовок: (заголовок новости)
-Текст: (текст новости на 600-650 символов с абзацами)"""
+Пример правильного ответа:
+Новый парк открыли в Гродно
+
+В центре Гродно состоялось торжественное открытие нового парка культуры и отдыха. На мероприятии присутствовали городские власти и жители.
+
+Парк занимает площадь 5 гектаров. Здесь установлены скамейки, фонари и детская площадка. Полностью завершить благоустройство планируют к концу года."""
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def remove_emojis(text: str) -> str:
@@ -582,25 +588,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "photo",
             "text": remove_emojis(caption),
             "photo_bytes": photo_bytes,
+            "photo_file_id": photo.file_id,
             "video_bytes": None
         }
         
-        # Отправляем фото с короткой подписью или без
+        await message.reply_photo(
+            photo=photo.file_id,
+            caption="✅ Пост получен!" if len(caption) > 900 else (f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!"),
+            reply_markup=get_post_preview_keyboard()
+        )
+        
         if len(caption) > 900:
-            await message.reply_photo(
-                photo=photo.file_id,
-                caption="✅ Пост получен!",
-                reply_markup=get_post_preview_keyboard()
-            )
             await message.reply_text(
                 f"📝 *Текст поста:*\n\n{caption}",
                 parse_mode="Markdown"
-            )
-        else:
-            await message.reply_photo(
-                photo=photo.file_id,
-                caption=f"✅ Пост получен!\n\n{caption}" if caption else "✅ Пост получен!",
-                reply_markup=get_post_preview_keyboard()
             )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
@@ -624,24 +625,20 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "video",
             "text": remove_emojis(caption),
             "photo_bytes": None,
-            "video_bytes": video_bytes
+            "video_bytes": video_bytes,
+            "video_file_id": video.file_id
         }
         
+        await message.reply_video(
+            video=video.file_id,
+            caption="✅ Видео получено!" if len(caption) > 900 else (f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!"),
+            reply_markup=get_video_keyboard()
+        )
+        
         if len(caption) > 900:
-            await message.reply_video(
-                video=video.file_id,
-                caption="✅ Видео получено!",
-                reply_markup=get_video_keyboard()
-            )
             await message.reply_text(
                 f"📝 *Текст видео:*\n\n{caption}",
                 parse_mode="Markdown"
-            )
-        else:
-            await message.reply_video(
-                video=video.file_id,
-                caption=f"✅ Видео получено!\n\n{caption}" if caption else "✅ Видео получено!",
-                reply_markup=get_video_keyboard()
             )
     except Exception as e:
         print(f"❌ Ошибка: {e}")
@@ -767,33 +764,23 @@ async def design_post_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"❌ Ошибка: {e}")
         await query.message.reply_text(f"⚠️ Ошибка оформления: {e}")
 
-# ==================== ФУНКЦИЯ DEEPSEEK С ПРОВЕРКОЙ ДЛИНЫ ====================
+# ==================== ФУНКЦИЯ DEEPSEEK ====================
 async def call_deepseek_with_retry(prompt, text, max_attempts=2):
     async def make_request(current_prompt, current_text):
         response = await deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": current_prompt},
-                {"role": "user", "content": f"Перепиши эту новость в формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл.\n\n{current_text}"}
+                {"role": "user", "content": f"Перепиши эту новость в формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
             ],
             temperature=0.7,
-            max_tokens=1200
+            max_tokens=1000
         )
         return response.choices[0].message.content
     
     for attempt in range(max_attempts):
         content = await make_request(prompt, text)
-        
-        body = ""
-        if "Текст:" in content:
-            body_match = re.search(r'Текст:\s*(.+?)$', content, re.IGNORECASE | re.DOTALL)
-            if body_match:
-                body = body_match.group(1).strip()
-        if not body:
-            lines = content.strip().split('\n')
-            body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else content.strip()
-        
-        char_count = len(body)
+        char_count = len(content)
         
         if 550 <= char_count <= 700 or attempt == max_attempts - 1:
             return content
@@ -805,7 +792,7 @@ async def call_deepseek_with_retry(prompt, text, max_attempts=2):
     
     return content
 
-# ==================== ОБРАБОТКА ИИ (ПРАВИЛЬНАЯ ВЕРСИЯ ИЗ ПЕРВОГО БОТА) ====================
+# ==================== ОБРАБОТКА ИИ ====================
 async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -826,47 +813,80 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("❌ Нет текста для обработки")
         return
     
-    await query.message.reply_text("🤖 Обрабатываю текст через DeepSeek...")
+    status_msg = await query.message.reply_text("🤖 Перерабатываю текст через DeepSeek AI (600-650 символов)...")
     
     try:
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": DEEPSEEK_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
+        processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
         
-        processed_text = response.choices[0].message.content
+        # Очищаем от маркеров
+        processed_text = processed_text.strip()
         
-        title = ""
-        body = ""
-        for line in processed_text.split('\n'):
-            if line.startswith("Заголовок:"):
-                title = line.replace("Заголовок:", "").strip()
-            elif line.startswith("Текст:"):
-                body = line.replace("Текст:", "").strip()
+        # Удаляем строки с "Заголовок:" и "Текст:" если они есть
+        lines = processed_text.split('\n')
+        clean_lines = []
+        for line in lines:
+            line_clean = line.strip()
+            if line_clean.lower().startswith("заголовок:") or line_clean.lower().startswith("текст:"):
+                # Пропускаем эти строки
+                continue
+            clean_lines.append(line)
         
-        if not title and not body:
-            body = processed_text
+        processed_text = '\n'.join(clean_lines).strip()
         
-        new_text = f"{title}\n\n{body}" if title and body else (body if body else processed_text)
+        # Разделяем на заголовок и тело
+        parts = processed_text.split('\n\n', 1)
+        if len(parts) == 2:
+            title = parts[0].strip()
+            body = parts[1].strip()
+        else:
+            # Если нет пустой строки, пробуем разделить по первой строке
+            first_newline = processed_text.find('\n')
+            if first_newline != -1 and first_newline < 100:
+                title = processed_text[:first_newline].strip()
+                body = processed_text[first_newline:].strip()
+            else:
+                title = processed_text[:70].strip()
+                body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
+        
+        # Очищаем от лишних символов
+        title = re.sub(r'^[#*\-_]+', '', title).strip()
+        body = re.sub(r'^[#*\-_]+', '', body).strip()
+        
+        char_count = len(body)
+        
+        # Формируем итоговый текст
+        new_text = f"{title}\n\n{body}"
         session["text"] = new_text
         
-        # Показываем результат
+        if 600 <= char_count <= 650:
+            status = "✅ Отлично!"
+        elif 550 <= char_count < 600:
+            status = "⚠️ Немного коротковат (нужно 600-650)"
+        elif 650 < char_count <= 700:
+            status = "⚠️ Немного длинноват (нужно 600-650)"
+        else:
+            status = f"⚠️ Не соответствует (нужно 600-650)"
+        
+        await status_msg.delete()
+        
         if session.get("photo_file_id"):
             await query.message.reply_photo(
                 photo=session["photo_file_id"],
-                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+                caption=f"✅ *Текст обработан!*\n\n"
+                        f"📰 *{title}*\n\n"
+                        f"📝 {body}\n\n"
+                        f"📊 *Длина текста:* {char_count} символов {status}\n\n"
+                        f"Выберите действие:",
                 parse_mode="Markdown",
                 reply_markup=get_ai_result_keyboard()
             )
-        elif session.get("photo_bytes"):
-            await query.message.reply_photo(
-                photo=InputFile(io.BytesIO(session["photo_bytes"]), filename="post.jpg"),
-                caption=f"✅ *Текст обработан!*\n\n{new_text[:500]}...",
+        else:
+            await query.message.reply_text(
+                f"✅ *Текст обработан!*\n\n"
+                f"📰 *{title}*\n\n"
+                f"📝 {body}\n\n"
+                f"📊 *Длина текста:* {char_count} символов {status}\n\n"
+                f"Выберите действие:",
                 parse_mode="Markdown",
                 reply_markup=get_ai_result_keyboard()
             )
@@ -878,7 +898,7 @@ async def ai_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         
     except Exception as e:
         print(f"❌ Ошибка DeepSeek: {e}")
-        await query.message.reply_text(f"❌ Ошибка: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
 
 async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -905,38 +925,37 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
     try:
         processed_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
         
-        title = ""
-        body = ""
+        processed_text = processed_text.strip()
         
-        if "Заголовок:" in processed_text or "ЗАГОЛОВОК:" in processed_text:
-            title_match = re.search(r'(?:Заголовок:|ЗАГОЛОВОК:)\s*(.+?)(?=(?:Текст:|ТЕКСТ:|$))', processed_text, re.IGNORECASE | re.DOTALL)
-            if title_match:
-                title = title_match.group(1).strip()
-            
-            body_match = re.search(r'(?:Текст:|ТЕКСТ:)\s*(.+?)$', processed_text, re.IGNORECASE | re.DOTALL)
-            if body_match:
-                body = body_match.group(1).strip()
+        lines = processed_text.split('\n')
+        clean_lines = []
+        for line in lines:
+            line_clean = line.strip()
+            if line_clean.lower().startswith("заголовок:") or line_clean.lower().startswith("текст:"):
+                continue
+            clean_lines.append(line)
         
-        if not title and not body:
-            parts = processed_text.split('\n\n', 1)
-            if len(parts) == 2:
-                title = parts[0].strip()
-                body = parts[1].strip()
+        processed_text = '\n'.join(clean_lines).strip()
+        
+        parts = processed_text.split('\n\n', 1)
+        if len(parts) == 2:
+            title = parts[0].strip()
+            body = parts[1].strip()
+        else:
+            first_newline = processed_text.find('\n')
+            if first_newline != -1 and first_newline < 100:
+                title = processed_text[:first_newline].strip()
+                body = processed_text[first_newline:].strip()
             else:
-                body = processed_text
+                title = processed_text[:70].strip()
+                body = processed_text[70:].strip() if len(processed_text) > 70 else processed_text
         
-        if len(title) > 100:
-            title = title[:97] + "..."
-        
-        if not body:
-            body = processed_text
-        
-        body = re.sub(r'^Текст:\s*', '', body, flags=re.IGNORECASE)
-        body = body.strip()
+        title = re.sub(r'^[#*\-_]+', '', title).strip()
+        body = re.sub(r'^[#*\-_]+', '', body).strip()
         
         char_count = len(body)
         
-        new_text = f"{title}\n\n{body}" if title else body
+        new_text = f"{title}\n\n{body}"
         session["text"] = new_text
         
         if 600 <= char_count <= 650:
@@ -950,15 +969,27 @@ async def ai_process_video_callback(update: Update, context: ContextTypes.DEFAUL
         
         await status_msg.delete()
         
-        await query.message.reply_text(
-            f"✅ *Текст обработан!*\n\n"
-            f"📰 *Заголовок:* {title}\n\n"
-            f"📝 *Текст:*\n{body}\n\n"
-            f"📊 *Длина текста:* {char_count} символов {status}\n\n"
-            f"Выберите действие:",
-            parse_mode="Markdown",
-            reply_markup=get_video_ai_result_keyboard()
-        )
+        if session.get("video_file_id"):
+            await query.message.reply_video(
+                video=session["video_file_id"],
+                caption=f"✅ *Текст обработан!*\n\n"
+                        f"📰 *{title}*\n\n"
+                        f"📝 {body}\n\n"
+                        f"📊 *Длина текста:* {char_count} символов {status}\n\n"
+                        f"Выберите действие:",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
+        else:
+            await query.message.reply_text(
+                f"✅ *Текст обработан!*\n\n"
+                f"📰 *{title}*\n\n"
+                f"📝 {body}\n\n"
+                f"📊 *Длина текста:* {char_count} символов {status}\n\n"
+                f"Выберите действие:",
+                parse_mode="Markdown",
+                reply_markup=get_video_ai_result_keyboard()
+            )
         
         try:
             await query.message.delete()
@@ -1002,10 +1033,15 @@ async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFA
     context.user_data["waiting_for_ai_request_video"] = True
 
 async def handle_ai_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, не callback ли это
+    if update.callback_query:
+        return
+    
     if context.user_data.get("waiting_for_ai_request"):
         request = update.message.text
         context.user_data["waiting_for_ai_request"] = False
         await update.message.reply_text(f"✅ Запрос: *{request}*\n🤖 Обрабатываю...", parse_mode="Markdown")
+        # Создаем фейковый query
         class FakeQuery:
             def __init__(self, message, from_user):
                 self.message = message
