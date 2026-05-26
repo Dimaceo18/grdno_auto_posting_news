@@ -44,6 +44,11 @@ CHANNELS = {
         "channel_id": os.getenv("CHANNEL_ID_BARANOVICHI"),
         "link": os.getenv("CHANNEL_LINK_BARANOVICHI", "https://t.me/baranovichi_news")
     },
+    "borisov": {
+        "name": "Фидер Борисов",
+        "channel_id": os.getenv("CHANNEL_ID_BORISOV"),
+        "link": os.getenv("CHANNEL_LINK_BORISOV", "https://t.me/borisov_news")
+    },
     "vitebsk": {
         "name": "Фидер Витебск",
         "channel_id": os.getenv("CHANNEL_ID_VITEBSK"),
