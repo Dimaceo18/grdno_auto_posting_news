@@ -88,7 +88,7 @@ DEEPSEEK_PROMPT = """Перепиши новость в формате на 600-
 Парк занимает площадь 5 гектаров. Здесь установлены скамейки, фонари и детская площадка. Полностью завершить благоустройство планируют к концу года."""
 
 # Промпт для Тридс
-TRIDS_PROMPT = """Перепиши новость в формате на 480 символов для Тридс.
+TRIDS_PROMPT = """Перепиши новость в формате до 400 символов для Тридс.
 
 Правила:
 - Удали смайлики и рекламу
@@ -611,7 +611,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🎨 Оформление постов с текстом на фото\n"
         "• ✏️ Редактирование текста\n"
         "• 🤖 Обработка текста через ИИ (DeepSeek)\n"
-        "• 📱 Создание постов для Тридс (480 символов)\n"
+        "• 📱 Создание постов для Тридс (400 символов)\n"
         "• 🌍 Публикация в несколько каналов\n"
         "• ⏰ Отложенная публикация\n\n"
         "👇 *Нажмите кнопку*",
@@ -869,7 +869,7 @@ async def call_deepseek_with_retry_trids(prompt, text, max_attempts=2):
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": current_prompt},
-                    {"role": "user", "content": f"Перепиши эту новость в формате на 480 символов для Тридс. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
+                    {"role": "user", "content": f"Перепиши эту новость в формате на 400 символов для Тридс. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
                 ],
                 temperature=0.7,
                 max_tokens=1000
@@ -896,9 +896,9 @@ async def call_deepseek_with_retry_trids(prompt, text, max_attempts=2):
                 return content
             
             if char_count < 450:
-                text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 480). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
+                text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 400). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
             else:
-                text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 480). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
+                text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 400). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
         except Exception as e:
             print(f"Ошибка при попытке {attempt + 1}: {e}")
             if attempt == max_attempts - 1:
@@ -1381,7 +1381,7 @@ async def ai_reprocess_video_callback(update: Update, context: ContextTypes.DEFA
 
 # ==================== ОБРАБОТКА ТРИДС ====================
 async def trids_process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текста для Тридс через DeepSeek AI (480 символов)"""
+    """Обработка текста для Тридс через DeepSeek AI (400 символов)"""
     query = update.callback_query
     await query.answer()
     
@@ -1404,7 +1404,7 @@ async def trids_process_callback(update: Update, context: ContextTypes.DEFAULT_T
     if "original_text_for_reprocess" not in session:
         session["original_text_for_reprocess"] = text
     
-    status_msg = await query.message.reply_text("🤖 Перерабатываю текст для Тридс через DeepSeek AI (480 символов)...")
+    status_msg = await query.message.reply_text("🤖 Перерабатываю текст для Тридс через DeepSeek AI (400 символов)...")
     
     try:
         processed_text = await call_deepseek_with_retry_trids(TRIDS_PROMPT, text)
@@ -1469,11 +1469,11 @@ async def trids_process_callback(update: Update, context: ContextTypes.DEFAULT_T
         if 450 <= char_count <= 510:
             status = "✅ Отлично!"
         elif 400 <= char_count < 450:
-            status = "⚠️ Немного коротковат (нужно 480)"
+            status = "⚠️ Немного коротковат (нужно 400)"
         elif 510 < char_count <= 550:
-            status = "⚠️ Немного длинноват (нужно 480)"
+            status = "⚠️ Немного длинноват (нужно 400)"
         else:
-            status = f"⚠️ Не соответствует (нужно 480)"
+            status = f"⚠️ Не соответствует (нужно 400)"
         
         await status_msg.delete()
         
@@ -1509,7 +1509,7 @@ async def trids_process_callback(update: Update, context: ContextTypes.DEFAULT_T
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
 async def trids_process_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текста для Тридс через DeepSeek AI (480 символов) для видео"""
+    """Обработка текста для Тридс через DeepSeek AI (400 символов) для видео"""
     query = update.callback_query
     await query.answer()
     
@@ -1532,7 +1532,7 @@ async def trids_process_video_callback(update: Update, context: ContextTypes.DEF
     if "original_text_for_reprocess" not in session:
         session["original_text_for_reprocess"] = text
     
-    status_msg = await query.message.reply_text("🤖 Перерабатываю текст для Тридс через DeepSeek AI (480 символов)...")
+    status_msg = await query.message.reply_text("🤖 Перерабатываю текст для Тридс через DeepSeek AI (400 символов)...")
     
     try:
         processed_text = await call_deepseek_with_retry_trids(TRIDS_PROMPT, text)
@@ -1597,11 +1597,11 @@ async def trids_process_video_callback(update: Update, context: ContextTypes.DEF
         if 450 <= char_count <= 510:
             status = "✅ Отлично!"
         elif 400 <= char_count < 450:
-            status = "⚠️ Немного коротковат (нужно 480)"
+            status = "⚠️ Немного коротковат (нужно 400)"
         elif 510 < char_count <= 550:
-            status = "⚠️ Немного длинноват (нужно 480)"
+            status = "⚠️ Немного длинноват (нужно 400)"
         else:
-            status = f"⚠️ Не соответствует (нужно 480)"
+            status = f"⚠️ Не соответствует (нужно 400)"
         
         await status_msg.delete()
         
@@ -1653,7 +1653,7 @@ async def trids_reprocess_callback(update: Update, context: ContextTypes.DEFAULT
     await query.message.reply_text(
         "🤖 Отправляю повторный запрос к DeepSeek для Тридс...\n\n"
         "Требования:\n"
-        "• Длина текста: 480 символов\n"
+        "• Длина текста: 400 символов\n"
         "• Новостной формат\n"
         "• Сохранить все важные факты\n"
         "• Без смайликов и рекламы\n\n"
@@ -1662,10 +1662,10 @@ async def trids_reprocess_callback(update: Update, context: ContextTypes.DEFAULT
     )
     
     try:
-        reprocess_prompt = """Перепиши эту новость в новостном формате на 480 символов для Тридс.
+        reprocess_prompt = """Перепиши эту новость в новостном формате до 400 символов для Тридс.
 
 СТРОГИЕ ТРЕБОВАНИЯ:
-1. Длина текста ДОЛЖНА БЫТЬ 480 символов (считая пробелы)
+1. Длина текста ДОЛЖНА БЫТЬ 400 символов (считая пробелы)
 2. Сохрани ВСЕ важные факты из оригинального текста
 3. Разбей текст на 2-3 логических абзаца (пустая строка между абзацами)
 4. Удали смайлики, рекламу, обращения
@@ -1680,7 +1680,7 @@ async def trids_reprocess_callback(update: Update, context: ContextTypes.DEFAULT
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": reprocess_prompt},
-                {"role": "user", "content": f"Переделай этот текст в новость на 480 символов для Тридс. Сохрани все важные факты:\n\n{original_text}"}
+                {"role": "user", "content": f"Переделай этот текст в новость на 400 символов для Тридс. Сохрани все важные факты:\n\n{original_text}"}
             ],
             temperature=0.7,
             max_tokens=1200
@@ -1726,7 +1726,7 @@ async def trids_reprocess_callback(update: Update, context: ContextTypes.DEFAULT
             f"✅ *Текст для Тридс переделан!*\n\n"
             f"📰 *{title}*\n\n"
             f"📝 {body}\n\n"
-            f"📊 *Длина текста:* {char_count} символов (цель: 480)\n\n"
+            f"📊 *Длина текста:* {char_count} символов (цель: 400)\n\n"
             f"Выберите действие:",
             parse_mode="Markdown",
             reply_markup=get_trids_result_keyboard()
@@ -1758,7 +1758,7 @@ async def trids_reprocess_video_callback(update: Update, context: ContextTypes.D
     await query.message.reply_text(
         "🤖 Отправляю повторный запрос к DeepSeek для Тридс...\n\n"
         "Требования:\n"
-        "• Длина текста: 480 символов\n"
+        "• Длина текста: 400 символов\n"
         "• Новостной формат\n"
         "• Сохранить все важные факты\n"
         "• Без смайликов и рекламы\n\n"
@@ -1767,10 +1767,10 @@ async def trids_reprocess_video_callback(update: Update, context: ContextTypes.D
     )
     
     try:
-        reprocess_prompt = """Перепиши эту новость в новостном формате на 480 символов для Тридс.
+        reprocess_prompt = """Перепиши эту новость в новостном формате на 400 символов для Тридс.
 
 СТРОГИЕ ТРЕБОВАНИЯ:
-1. Длина текста ДОЛЖНА БЫТЬ 480 символов (считая пробелы)
+1. Длина текста ДОЛЖНА БЫТЬ 400 символов (считая пробелы)
 2. Сохрани ВСЕ важные факты из оригинального текста
 3. Разбей текст на 2-3 логических абзаца (пустая строка между абзацами)
 4. Удали смайлики, рекламу, обращения
@@ -1785,7 +1785,7 @@ async def trids_reprocess_video_callback(update: Update, context: ContextTypes.D
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": reprocess_prompt},
-                {"role": "user", "content": f"Переделай этот текст в новость на 480 символов для Тридс. Сохрани все важные факты:\n\n{original_text}"}
+                {"role": "user", "content": f"Переделай этот текст в новость на 400 символов для Тридс. Сохрани все важные факты:\n\n{original_text}"}
             ],
             temperature=0.7,
             max_tokens=1200
@@ -1833,7 +1833,7 @@ async def trids_reprocess_video_callback(update: Update, context: ContextTypes.D
                 caption=f"✅ *Текст для Тридс переделан!*\n\n"
                         f"📰 *{title}*\n\n"
                         f"📝 {body}\n\n"
-                        f"📊 *Длина текста:* {char_count} символов (цель: 480)\n\n"
+                        f"📊 *Длина текста:* {char_count} символов (цель: 400)\n\n"
                         f"Выберите действие:",
                 parse_mode="Markdown",
                 reply_markup=get_trids_video_result_keyboard()
@@ -1843,7 +1843,7 @@ async def trids_reprocess_video_callback(update: Update, context: ContextTypes.D
                 f"✅ *Текст для Тридс переделан!*\n\n"
                 f"📰 *{title}*\n\n"
                 f"📝 {body}\n\n"
-                f"📊 *Длина текста:* {char_count} символов (цель: 480)\n\n"
+                f"📊 *Длина текста:* {char_count} символов (цель: 400)\n\n"
                 f"Выберите действие:",
                 parse_mode="Markdown",
                 reply_markup=get_trids_video_result_keyboard()
@@ -2884,7 +2884,7 @@ async def run_bot():
     if deepseek_client:
         print("✅ DeepSeek API подключен")
         print("📏 Текст будет перерабатываться в формат 600-650 символов")
-        print("📏 Для Тридс: 480 символов")
+        print("📏 Для Тридс: 400 символов")
     else:
         print("⚠️ DeepSeek API не настроен")
     
